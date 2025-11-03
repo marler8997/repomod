@@ -73,20 +73,10 @@ namespace MarlerMod
                 DebugCommandHandler.instance.Register(sprintCmd);
                 logger.LogInfo("Sprint command registered!");
 
-                DebugCommandHandler.ChatCommand energyCmd = new DebugCommandHandler.ChatCommand(
-                    "energy",
-                    "Set energy upgrade level. Usage: energy <level>",
-                    new Action<bool, string[]>(ExecuteEnergyCommand),
-                    null, null, false
-                );
-                DebugCommandHandler.instance.Register(energyCmd);
-                logger.LogInfo("Energy command registered!");
-
-                // ADD THIS - Stamina is the same as energy
                 DebugCommandHandler.ChatCommand staminaCmd = new DebugCommandHandler.ChatCommand(
                     "stamina",
                     "Set stamina upgrade level. Usage: stamina <level>",
-                    new Action<bool, string[]>(ExecuteEnergyCommand),  // Reuse energy command
+                    new Action<bool, string[]>(ExecuteStaminaCommand),
                     null, null, false
                 );
                 DebugCommandHandler.instance.Register(staminaCmd);
@@ -110,114 +100,92 @@ namespace MarlerMod
             }
         }
 
-        private static void ExecuteSprintCommand(bool fromServer, string[] args)
+        enum UpgradeKind {
+            sprint,
+            stamina,
+            health,
+        };
+        private static void ExecuteUpgradeCommand(UpgradeKind kind, string[] args)
         {
-            logger.LogInfo("ExecuteSprintCommand called!");
-
-            if (args.Length < 1)
+            string steamID = GetLocalPlayerSteamID();
+            logger.LogInfo("Using Steam ID: " + steamID);
+            if (string.IsNullOrEmpty(steamID))
             {
-                logger.LogInfo("Usage: sprint <level>");
+                // TODO: include why it failed
+                SendConsoleResponse("failed to get steam ID");
                 return;
             }
 
-            int level;
-            if (!int.TryParse(args[0], out level))
-            {
-                logger.LogInfo("Invalid level. Must be a number.");
+            if (args.Length < 1) {
+                SendConsoleResponse("Usage: " +  kind.ToString() + " <level>");
                 return;
             }
 
-            try
+            string level_string = args[0];
+            int desired_level;
+            if (!int.TryParse(level_string, out desired_level))
             {
-                string steamID = GetLocalPlayerSteamID();
-                logger.LogInfo("Using Steam ID: " + steamID);
-
-                if (string.IsNullOrEmpty(steamID))
-                {
-                    logger.LogError("Could not get Steam ID!");
-                    return;
-                }
-
-                int result = PunManager.instance.UpgradePlayerSprintSpeed(steamID, level);
-                logger.LogInfo(string.Format("Sprint upgraded to level {0} (result: {1})", level, result));
+                SendConsoleResponse("ERROR: '" + level_string + "' is not an integer");
+                return;
             }
-            catch (Exception e)
-            {
+
+            int current_level;
+            try {
+                current_level = Upgrade(kind, steamID, 0);
+            } catch (Exception e) {
                 logger.LogError("Error: " + e.Message);
                 logger.LogError(e.StackTrace);
+                SendConsoleResponse("ERROR: upgrade API (to get current level) threw an exception!");
+                return;
+            }
+
+            int diff = desired_level - current_level;
+            int new_level;
+            try {
+                new_level = Upgrade(kind, steamID, diff);
+            } catch (Exception e) {
+                logger.LogError("Error: " + e.Message);
+                logger.LogError(e.StackTrace);
+                SendConsoleResponse("ERROR: upgrade API (to set new level) threw an exception!");
+                return;
+            }
+            if (new_level == desired_level) {
+                logger.LogInfo(string.Format("SUCCESS: {0} set to level {1}", kind, desired_level));
+            } else {
+                logger.LogInfo(string.Format("FAIL: {0} set to level {1} returned {2}", kind, desired_level, new_level));
             }
         }
 
-        private static void ExecuteEnergyCommand(bool fromServer, string[] args)
+
+        private static int Upgrade(UpgradeKind kind, string steamID, int change)
         {
-            logger.LogInfo("ExecuteEnergyCommand called!");
-
-            if (args.Length < 1)
-            {
-                logger.LogInfo("Usage: energy <level>");
-                return;
+            switch (kind) {
+                case UpgradeKind.sprint: return PunManager.instance.UpgradePlayerSprintSpeed(steamID, change);
+                case UpgradeKind.stamina: return PunManager.instance.UpgradePlayerEnergy(steamID, change);
+                case UpgradeKind.health: return PunManager.instance.UpgradePlayerHealth(steamID, change);
+                default: throw new InvalidOperationException();
             }
+        }
 
-            int level;
-            if (!int.TryParse(args[0], out level))
-            {
-                logger.LogInfo("Invalid level. Must be a number.");
-                return;
-            }
+        private static void ExecuteSprintCommand(bool fromServer, string[] args)
+        {
+            ExecuteUpgradeCommand(UpgradeKind.sprint, args);
+        }
 
-            try
-            {
-                string steamID = GetLocalPlayerSteamID();
-                if (string.IsNullOrEmpty(steamID))
-                {
-                    logger.LogError("Could not get Steam ID!");
-                    return;
-                }
-
-                int result = PunManager.instance.UpgradePlayerEnergy(steamID, level);
-                logger.LogInfo(string.Format("Energy upgraded to level {0} (result: {1})", level, result));
-            }
-            catch (Exception e)
-            {
-                logger.LogError("Error: " + e.Message);
-                logger.LogError(e.StackTrace);
-            }
+        private static void ExecuteStaminaCommand(bool fromServer, string[] args)
+        {
+            ExecuteUpgradeCommand(UpgradeKind.stamina, args);
         }
 
         private static void ExecuteHealthCommand(bool fromServer, string[] args)
         {
-            logger.LogInfo("ExecuteHealthCommand called!");
+            ExecuteUpgradeCommand(UpgradeKind.health, args);
+        }
 
-            if (args.Length < 1)
-            {
-                logger.LogInfo("Usage: health <level>");
-                return;
-            }
-
-            int level;
-            if (!int.TryParse(args[0], out level))
-            {
-                logger.LogInfo("Invalid level. Must be a number.");
-                return;
-            }
-
-            try
-            {
-                string steamID = GetLocalPlayerSteamID();
-                if (string.IsNullOrEmpty(steamID))
-                {
-                    logger.LogError("Could not get Steam ID!");
-                    return;
-                }
-
-                int result = PunManager.instance.UpgradePlayerHealth(steamID, level);
-                logger.LogInfo(string.Format("Health upgraded to level {0} (result: {1})", level, result));
-            }
-            catch (Exception e)
-            {
-                logger.LogError("Error: " + e.Message);
-                logger.LogError(e.StackTrace);
-            }
+        private static void SendConsoleResponse(string message)
+        {
+            // TODO: actually implment sending the response to the console
+            logger.LogInfo("TODO: Console message: " + message);
         }
 
         private static string GetLocalPlayerSteamID()
@@ -225,9 +193,6 @@ namespace MarlerMod
             // Method 0: Inspect PunManager structure
             try
             {
-                logger.LogInfo("=== Inspecting PunManager ===");
-
-                // Check all fields
                 System.Reflection.FieldInfo[] allFields = typeof(PunManager).GetFields(
                     System.Reflection.BindingFlags.Public |
                     System.Reflection.BindingFlags.NonPublic |
