@@ -1,26 +1,45 @@
-pub fn go(text: []const u8) union(enum) {
-    unexpected_token: struct {
-        expected: [:0]const u8,
-        token: Token,
-    },
-} {
-    std.log.err("TODO: interpret module source '{f}'", .{std.zig.fmtString(text)});
-    var offset: usize = 0;
-    while (true) {
-        const token = lex(text, offset);
-        offset = token.loc.end;
-        switch (token.tag) {
-            .keyword_set => {
-                @panic("todo: implement set");
-            },
-            .keyword_fn => @panic("todo: implement fn"),
-            else => return .{ .unexpected_token = .{
-                .expected = "set or fn",
-                .token = token,
-            } },
+const Value = struct {};
+
+pub const Vm = struct {
+    // allocator: std.mem.Allocator,
+    // symbol_table: std.StringHashMapUnmanaged(Value),
+
+    pub fn eval(vm: *Vm, text: []const u8) union(enum) {
+        unexpected_token: struct {
+            expected: [:0]const u8,
+            token: Token,
+        },
+    } {
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        _ = vm;
+        var offset: usize = 0;
+        while (true) {
+            const token = lex(text, offset);
+            offset = token.loc.end;
+            switch (token.tag) {
+                .identifier => {
+                    const token2 = lex(text, offset);
+                    offset = token2.loc.end;
+                    switch (token2.tag) {
+                        .equal => {
+                            @panic("todo: implement assign");
+                        },
+                        .l_paren => @panic("todo: implement function call"),
+                        else => return .{ .unexpected_token = .{
+                            .expected = "an '=' or '(' after identifier",
+                            .token = token2,
+                        } },
+                    }
+                },
+                .keyword_fn => @panic("todo: implement fn"),
+                else => return .{ .unexpected_token = .{
+                    .expected = "an identifier or 'fn' keyword",
+                    .token = token,
+                } },
+            }
         }
     }
-}
+};
 
 const Token = struct {
     tag: Tag,
@@ -101,7 +120,6 @@ const Token = struct {
         // doc_comment,
         // container_doc_comment,
         keyword_fn,
-        keyword_set,
     };
     pub const Loc = struct {
         start: usize,
@@ -136,7 +154,6 @@ const Token = struct {
         // .{ "resume", .keyword_resume },
         // .{ "return", .keyword_return },
         // .{ "linksection", .keyword_linksection },
-        .{ "set", .keyword_set },
         // .{ "struct", .keyword_struct },
         // .{ "suspend", .keyword_suspend },
         // .{ "switch", .keyword_switch },

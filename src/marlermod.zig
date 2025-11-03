@@ -114,17 +114,17 @@ const Mod = struct {
     state: union(enum) {
         initial,
         err_no_text: ErrorNoText,
-        have_text: TextState,
+        have_text: HaveText,
     } = .initial,
 
-    const TextState = struct {
+    const HaveText = struct {
         text: []u8,
         mod_state: ModState,
-        pub fn deinitTakeText(text_state: *TextState) []u8 {
-            text_state.mod_state.deinit();
-            text_state.mod_state = .unprocessed;
-            const text = text_state.text;
-            text_state.* = undefined;
+        pub fn deinitTakeText(have_text: *HaveText) []u8 {
+            have_text.mod_state.deinit();
+            have_text.mod_state = .unprocessed;
+            const text = have_text.text;
+            have_text.* = undefined;
             return text;
         }
     };
@@ -202,10 +202,6 @@ const Mod = struct {
                 std.heap.page_allocator.free(state.text);
                 mod.state = undefined;
             },
-            // .text_loaded => |t| {
-            //     std.heap.page_allocator.free(t.text);
-            //     mod.state = undefined;
-            // },
         }
         mod.logNewErrorNoText(err);
         mod.state = .{ .err_no_text = err };
@@ -310,12 +306,16 @@ fn updateMods(scratch: std.mem.Allocator) void {
             .have_text => |*state| {
                 switch (state.mod_state) {
                     .unprocessed => {
-                        switch (@import("interpret.zig").go(state.text)) {
+                        var vm: interpret.Vm = .{
+                            // .allocator = state.mod_state.arena.alloator(),
+                        };
+                        switch (vm.eval(state.text)) {
                             .unexpected_token => |e| {
                                 std.log.err(
-                                    "mod '{s}' syntax error: expected {s} but got token {t} '{s}'",
+                                    "{s}:{d}: syntax error: expected {s} but got token {t} '{s}'",
                                     .{
                                         mod.name(),
+                                        getLineNum(state.text, e.token.loc.start),
                                         e.expected,
                                         e.token.tag,
                                         state.text[e.token.loc.start..e.token.loc.end],
@@ -335,6 +335,14 @@ fn updateMods(scratch: std.mem.Allocator) void {
         std.log.info("deleting mod '{s}'", .{mod.name()});
         mod.delete();
     }
+}
+
+fn getLineNum(text: []const u8, offset: usize) u32 {
+    var line_num: u32 = 1;
+    for (text[0..@min(text.len, offset)]) |c| {
+        if (c == '\n') line_num += 1;
+    }
+    return line_num;
 }
 
 fn findStaleMod() ?*Mod {
@@ -549,3 +557,4 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
 const std = @import("std");
 const win32 = @import("win32").everything;
 const Mutex = @import("Mutex.zig");
+const interpret = @import("interpret.zig");
