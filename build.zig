@@ -50,6 +50,17 @@ pub fn build(b: *std.Build) void {
         // if (b.args)
     }
 
+    {
+        const t = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/interpret.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run = b.addRunArtifact(t);
+        b.step("test", "").dependOn(&run.step);
+    }
     // b.installArtifact(framework);
 
     // // Create a run step for the launcher
