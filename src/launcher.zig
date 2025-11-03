@@ -190,10 +190,7 @@ fn launchAndInject(
     _ = win32.CloseHandle(pi.hThread);
 }
 
-fn injectDLL(
-    process: win32.HANDLE,
-    dll_path: [:0]const u16,
-) !void {
+fn injectDLL(process: win32.HANDLE, dll_path: [:0]const u16) !void {
     const path_size = (dll_path.len + 1) * @sizeOf(u16);
     const remote_mem = win32.VirtualAllocEx(
         process,
@@ -253,7 +250,10 @@ fn injectDLL(
     }
 
     var exit_code: u32 = undefined;
-    if (0 == win32.GetExitCodeThread(thread, &exit_code)) win32.panicWin32("GetExitCodeThread", win32.GetLastError());
+    if (0 == win32.GetExitCodeThread(thread, &exit_code)) win32.panicWin32(
+        "GetExitCodeThread",
+        win32.GetLastError(),
+    );
 
     if (exit_code == 0) {
         std.log.err(

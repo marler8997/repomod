@@ -37,6 +37,117 @@ pub fn panic(
 pub const std_options: std.Options = .{
     .logFn = log,
 };
+pub export fn _DllMainCRTStartup(
+    hinst: win32.HINSTANCE,
+    reason: u32,
+    reserved: *anyopaque,
+) callconv(.winapi) win32.BOOL {
+    _ = hinst;
+    _ = reserved;
+    switch (reason) {
+        win32.DLL_PROCESS_ATTACH => {
+            // !!! WARNING !!! do not log here...logging uses APIs that we probably
+            // aren't supposed to call at this phase.
+            if (false) win32.OutputDebugStringW(win32.L("MarlerMod: proces attach\n"));
+
+            // We'll spawn a thread so we can do our initialization outside the loader lock
+            const thread = win32.CreateThread(null, 0, initThreadEntry, null, .{}, null) orelse {
+                win32.OutputDebugStringW(win32.L("MarlerMod: CreateThread failed"));
+                // TODO: how can we log the error code?
+                return 1; // fail
+            };
+            win32.closeHandle(thread);
+
+            // if (true) {
+            //     win32.OutputDebugStringW(win32.L("MarlerMod: testing error\n"));
+            //     return 0; // fail
+            // }
+
+            // var dll_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            // const dll_path = try getDllPath(&dll_path_buf);
+            // std.log.info("DLL loaded from: {s}", .{dll_path});
+
+            // At this point we're running inside the game process
+            // But we can't directly call Unity APIs yet - we need to hook into
+            // the game's main thread
+
+            // For now, just log success and prepare for the C# side to take over
+            // In a full implementation, we would:
+            // 1. Find the Mono/IL2CPP runtime
+            // 2. Load our managed DLL (ScriptEngine.dll)
+            // 3. Call into C# to set up the rest
+
+            // std.log.info("Native initialization complete", .{});
+            // std.log.info("TODO: Hook into Mono runtime and load managed DLL", .{});
+
+        },
+        win32.DLL_THREAD_ATTACH => {},
+        win32.DLL_THREAD_DETACH => {},
+        win32.DLL_PROCESS_DETACH => {
+            // I don't think I need to lock the global mutex here
+            // restoreAllWindows();
+            // global.arena_instance.deinit();
+        },
+        else => unreachable,
+    }
+    return 1; // success
+}
+
+fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
+    _ = context;
+    std.log.info("Init Thread running!", .{});
+
+    // {
+    //     {
+    //         {
+    //             global.mutex.lock();
+    //             defer global.mutex.unlock();
+    //             if (!global.localappdata_resolved) {
+    //                 global.localappdata = std.process.getenvW(win32.L("localappdata"));
+    //                 global.localappdata_resolved = true;
+    //             }
+    //         }
+
+    //         // break :blk global.localappdata;
+    //         var path_buf: [max_log_path]u16 = undefined;
+    //         if (makeLocalAppDataPath(&path_buf, global.localappdata.?, win32.L("marlermod\\log"))) |p| {
+    //             std.log.info("localappdata path '{f}'", .{std.unicode.fmtUtf16Le(std.mem.span(p))});
+    //         }
+    //     }
+    // }
+
+    // _ = msgbox(.{}, "MarlerMod Init Thread", "InitThread running!", .{});
+    return 0;
+}
+
+// fn getDllPath(buf: []u8) ![]const u8 {
+//     var path_buf_w: [std.fs.max_path_bytes]u16 = undefined;
+
+//     // Get the path of this DLL
+//     // Pass null as hModule to get the path of the current module (our DLL)
+//     const len = win32.GetModuleFileNameW(
+//         null,
+//         &path_buf_w,
+//         path_buf_w.len,
+//     );
+
+//     if (len == 0) {
+//         return error.GetModuleFileNameFailed;
+//     }
+
+//     // Convert from UTF-16 to UTF-8 without allocator
+//     const path_w = path_buf_w[0..len :0];
+//     const utf8_len = std.unicode.utf16LeToUtf8(buf, path_w) catch return error.Utf16ToUtf8Failed;
+//     return buf[0..utf8_len];
+// }
+
+// Export a function that the C# managed code can call
+// This allows us to bridge between native and managed
+export fn NativeLog(message: [*:0]const u8) callconv(.c) void {
+    const msg = std.mem.span(message);
+    std.log.info("{s}", .{msg});
+}
+
 fn log(
     comptime message_level: std.log.Level,
     comptime scope: @Type(.enum_literal),
@@ -55,12 +166,15 @@ fn log(
         }
         break :blk global.localappdata;
     } orelse {
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        if (true) @panic("no localappdata");
         // no localappdata, guess we won't log anything
         return;
     };
 
     const log_size = log_size_blk: {
         const log_file = openLog(localappdata) orelse {
+            if (true) @panic("here");
             // TODO: should we do anything?
             return;
         };
@@ -103,89 +217,13 @@ fn log(
     }
 }
 
-pub export fn _DllMainCRTStartup(
-    hinst: win32.HINSTANCE,
-    reason: u32,
-    reserved: *anyopaque,
-) callconv(.winapi) win32.BOOL {
-    _ = hinst;
-    _ = reserved;
-    switch (reason) {
-        win32.DLL_PROCESS_ATTACH => {
-            // !!! WARNING !!! do not log here...logging uses APIs that we probably
-            // aren't supposed to call at this phase
-            if (false) win32.OutputDebugStringW(win32.L("MarlerMod: proces attach\n"));
-
-            // if (true) {
-            //     win32.OutputDebugStringW(win32.L("MarlerMod: testing error\n"));
-            //     return 0; // fail
-            // }
-
-            // var dll_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            // const dll_path = try getDllPath(&dll_path_buf);
-            // std.log.info("DLL loaded from: {s}", .{dll_path});
-
-            // At this point we're running inside the game process
-            // But we can't directly call Unity APIs yet - we need to hook into
-            // the game's main thread
-
-            // For now, just log success and prepare for the C# side to take over
-            // In a full implementation, we would:
-            // 1. Find the Mono/IL2CPP runtime
-            // 2. Load our managed DLL (ScriptEngine.dll)
-            // 3. Call into C# to set up the rest
-
-            // std.log.info("Native initialization complete", .{});
-            // std.log.info("TODO: Hook into Mono runtime and load managed DLL", .{});
-
-        },
-        win32.DLL_THREAD_ATTACH => {},
-        win32.DLL_THREAD_DETACH => {},
-        win32.DLL_PROCESS_DETACH => {
-            // I don't think I need to lock the global mutex here
-            // restoreAllWindows();
-            // global.arena_instance.deinit();
-        },
-        else => unreachable,
-    }
-    return 1; // success
-}
-
-// fn getDllPath(buf: []u8) ![]const u8 {
-//     var path_buf_w: [std.fs.max_path_bytes]u16 = undefined;
-
-//     // Get the path of this DLL
-//     // Pass null as hModule to get the path of the current module (our DLL)
-//     const len = win32.GetModuleFileNameW(
-//         null,
-//         &path_buf_w,
-//         path_buf_w.len,
-//     );
-
-//     if (len == 0) {
-//         return error.GetModuleFileNameFailed;
-//     }
-
-//     // Convert from UTF-16 to UTF-8 without allocator
-//     const path_w = path_buf_w[0..len :0];
-//     const utf8_len = std.unicode.utf16LeToUtf8(buf, path_w) catch return error.Utf16ToUtf8Failed;
-//     return buf[0..utf8_len];
-// }
-
-// Export a function that the C# managed code can call
-// This allows us to bridge between native and managed
-export fn NativeLog(message: [*:0]const u8) callconv(.c) void {
-    const msg = std.mem.span(message);
-    std.log.info("{s}", .{msg});
-}
-
 const max_log_path = 2000;
 
 fn makeLocalAppDataPath(
     path_buf: []u16,
     localappdata: []const u16,
     sub_path: []const u16,
-) ?[*:0]const u16 {
+) ?[:0]const u16 {
     if (localappdata.len + 1 + sub_path.len >= path_buf.len) {
         // oh well
         return null;
@@ -194,12 +232,19 @@ fn makeLocalAppDataPath(
     path_buf[localappdata.len] = '\\';
     @memcpy(path_buf[localappdata.len + 1 ..][0..sub_path.len], sub_path);
     path_buf[localappdata.len + 1 + sub_path.len] = 0;
-    return @ptrCast(path_buf.ptr);
+    return path_buf.ptr[0 .. localappdata.len + 1 + sub_path.len :0];
 }
 
 fn openLog(localappdata: []const u16) ?std.fs.File {
-    var path_buf: [max_log_path]u16 = undefined;
-    const path = makeLocalAppDataPath(&path_buf, localappdata, win32.L("marlermod\\log")) orelse return null;
+    // var path_buf: [max_log_path]u16 = undefined;
+    // const path = makeLocalAppDataPath(&path_buf, localappdata, win32.L("marlermod\\log.txt")) orelse return null;
+    _ = localappdata;
+    const path = win32.L("C:\\temp\\marlermod.log");
+
+    // if (getDirname(path)) |log_dir| {
+    //     _ = log_dir;
+    //     @panic("todo");
+    // }
 
     var attempt: u32 = 1;
     while (true) : (attempt += 1) {
