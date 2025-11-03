@@ -116,6 +116,11 @@ pub export fn _DllMainCRTStartup(
             // aren't supposed to call at this phase
             if (false) win32.OutputDebugStringW(win32.L("MarlerMod: proces attach\n"));
 
+            // if (true) {
+            //     win32.OutputDebugStringW(win32.L("MarlerMod: testing error\n"));
+            //     return 0; // fail
+            // }
+
             // var dll_path_buf: [std.fs.max_path_bytes]u8 = undefined;
             // const dll_path = try getDllPath(&dll_path_buf);
             // std.log.info("DLL loaded from: {s}", .{dll_path});

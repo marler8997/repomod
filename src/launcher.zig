@@ -43,7 +43,7 @@ pub fn main() !void {
     // std.log.info("Framework: {s}", .{marler_mod_dll});
 
     // Launch and inject
-    std.log.info("Launching game...", .{});
+    std.log.info("launching game...", .{});
     try launchAndInject(gpa, game_exe, marler_mod_dll);
     std.log.info("Success! Game launched with framework injected.", .{});
     std.log.info("Check logs/ folder for framework output.", .{});
@@ -175,13 +175,11 @@ fn launchAndInject(
     );
     if (result == 0) win32.panicWin32("CreateProcess", win32.GetLastError());
 
-    std.log.info("Process created (PID: {})", .{pi.dwProcessId});
+    std.log.info("created game process (pid {})", .{pi.dwProcessId});
     injectDLL(pi.hProcess.?, dll_path_w) catch |err| {
         _ = win32.TerminateProcess(pi.hProcess, 1);
         return err;
     };
-
-    std.log.info("DLL injected successfully", .{});
 
     // Resume the process
     _ = win32.ResumeThread(pi.hThread);
@@ -196,21 +194,23 @@ fn injectDLL(
     process: win32.HANDLE,
     dll_path: [:0]const u16,
 ) !void {
-    // Calculate size needed for DLL path (in bytes, including null terminator)
-    // const path_len = std.mem.indexOfSentinel(u16, 0, dll_path_w);
     const path_size = (dll_path.len + 1) * @sizeOf(u16);
-
     const remote_mem = win32.VirtualAllocEx(
         process,
         null,
         path_size,
         .{ .COMMIT = 1, .RESERVE = 1 },
         win32.PAGE_READWRITE,
-    ) orelse {
-        const err = win32.GetLastError();
-        std.log.err("VirtualAllocEx failed. Error code: {}", .{@intFromEnum(err)});
-        return error.AllocFailed;
-    };
+    ) orelse std.debug.panic(
+        "VirtualAllocEx ({} bytes) for game process failed, error={f}",
+        .{ path_size, win32.GetLastError() },
+    );
+    defer if (0 == win32.VirtualFreeEx(
+        process,
+        remote_mem,
+        0,
+        win32.MEM_RELEASE,
+    )) win32.panicWin32("VirtualFreeEx", win32.GetLastError());
 
     const dll_path_bytes = @as([*]const u8, @ptrCast(dll_path))[0..path_size];
     if (0 == win32.WriteProcessMemory(
@@ -243,11 +243,27 @@ fn injectDLL(
         "CreateRemoteThread",
         win32.GetLastError(),
     );
+    defer win32.closeHandle(thread);
+    switch (win32.WaitForSingleObject(thread, win32.INFINITE)) {
+        @intFromEnum(win32.WAIT_OBJECT_0) => {},
+        @intFromEnum(win32.WAIT_FAILED) => win32.panicWin32("WaitForSingleObject(thread)", win32.GetLastError()),
+        else => |result| {
+            std.debug.panic("WaitForSingleObject(thread) returned {}", .{result});
+        },
+    }
 
-    // Wait for LoadLibrary to complete
-    _ = win32.WaitForSingleObject(thread, win32.INFINITE);
-    _ = win32.CloseHandle(thread);
+    var exit_code: u32 = undefined;
+    if (0 == win32.GetExitCodeThread(thread, &exit_code)) win32.panicWin32("GetExitCodeThread", win32.GetLastError());
 
-    // Free allocated memory
-    _ = win32.VirtualFreeEx(process, remote_mem, 0, win32.MEM_RELEASE);
+    if (exit_code == 0) {
+        std.log.err(
+            "{f}: _DllMainCRTStartup for process attach failed.",
+            .{std.unicode.fmtUtf16Le(dll_path)},
+        );
+        std.process.exit(0xff);
+    }
+    std.log.debug(
+        "{f}: Loaded at address 0x{x} (might be truncated)",
+        .{ std.unicode.fmtUtf16Le(dll_path), exit_code },
+    );
 }
