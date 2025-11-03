@@ -1,12 +1,26 @@
+const Extent = struct { start: usize, end: usize };
+
 const Value = union(enum) {
+    string_literal: Extent,
     pub fn deinit(value: *Value) void {
-        switch (value.*) {}
+        switch (value.*) {
+            .string_literal => {},
+        }
+    }
+    pub fn moveInto(value: *Value, dst: *Value) void {
+        switch (value.*) {
+            .string_literal,
+            => {
+                dst.* = value.*;
+            },
+        }
     }
 };
 
 pub const VmError = union(enum) {
     unexpected_token: struct { expected: [:0]const u8, token: Token },
     unknown_builtin: Token,
+    builtin_arg_count: struct { builtin_extent: Extent, arg_count: usize },
     oom,
     pub fn set(err: *VmError, value: VmError) error{Vm} {
         err.* = value;
@@ -41,6 +55,22 @@ pub const VmError = union(enum) {
                         f.text[token.start..token.end],
                     },
                 ),
+                .builtin_arg_count => |b| {
+                    const builtin_str = f.text[b.builtin_extent.start..b.builtin_extent.end];
+                    const builtin = builtins.get(builtin_str).?;
+                    const arg_count = builtin.argCount();
+                    const arg_suffix: []const u8 = if (arg_count == 1) "" else "s";
+                    try writer.print(
+                        "{d}: builtin '{s}' requires {} arg{s} but got {}",
+                        .{
+                            getLineNum(f.text, b.builtin_extent.start),
+                            builtin_str,
+                            arg_count,
+                            arg_suffix,
+                            b.arg_count,
+                        },
+                    );
+                },
                 .oom => try writer.writeAll("out of memory"),
             }
         }
@@ -56,20 +86,29 @@ fn getLineNum(text: []const u8, offset: usize) u32 {
 }
 
 pub const Vm = struct {
-    symbol_table: std.StringHashMapUnmanaged(SymbolTableEntry) = .{},
-    const SymbolTableEntry = struct {
-        value: Value,
-        pub fn deinit(entry: *SymbolTableEntry) void {
-            entry.value.deinit();
-        }
-        pub fn init(entry: *SymbolTableEntry, value: Value) void {
-            entry.value = value;
-        }
-    };
+    symbol_table: std.StringHashMapUnmanaged(Value) = .{},
+    stack: std.ArrayListUnmanaged(Value) = .{},
+
+    // const SymbolTableEntry = struct {
+    //     value: Value,
+    //     pub fn deinit(entry: *SymbolTableEntry) void {
+    //         entry.value.deinit();
+    //     }
+    //     pub fn init(entry: *SymbolTableEntry, value: Value) void {
+    //         entry.value = value;
+    //     }
+    // };
 
     pub fn deinit(vm: *Vm, allocator: std.mem.Allocator) void {
         vm.symbol_table.deinit(allocator);
         vm.* = undefined;
+    }
+
+    fn stackEnsureUnusedSlot(vm: *Vm, allocator: std.mem.Allocator, out_err: *VmError) error{Vm}!void {
+        vm.stack.ensureUnusedCapacity(allocator, 1) catch return out_err.set(.oom);
+    }
+    fn stackPushAssume(vm: *Vm, value: Value) void {
+        vm.stack.appendAssumeCapacity(value);
     }
 
     pub fn interpret(
@@ -89,12 +128,12 @@ pub const Vm = struct {
                     offset = second_token.end;
                     switch (second_token.tag) {
                         .equal => {
-                            const value = try vm.eval(allocator, out_err, text, second_token.end);
+                            var value, offset = try vm.eval(allocator, out_err, text, second_token.end);
                             const entry = vm.symbol_table.getOrPut(allocator, id) catch |e| return out_err.setOom(e);
                             if (entry.found_existing) {
                                 entry.value_ptr.deinit();
                             }
-                            entry.value_ptr.init(value);
+                            value.moveInto(entry.value_ptr);
                         },
                         .l_paren => @panic("todo: implement function call"),
                         else => return out_err.set(.{ .unexpected_token = .{
@@ -118,11 +157,11 @@ pub const Vm = struct {
         out_err: *VmError,
         text: []const u8,
         start: usize,
-    ) error{Vm}!Value {
+    ) error{Vm}!struct { Value, usize } {
         const first_token = lex(text, start);
         // offset = first_token.end;
-        _ = allocator;
-        _ = vm;
+        // _ = allocator;
+        // _ = vm;
         // _ = text;
         // _ = start;
         // @panic("todo: implement eval");
@@ -131,9 +170,9 @@ pub const Vm = struct {
                 const id = text[first_token.start..first_token.end];
                 const builtin = builtins.get(id) orelse return out_err.set(.{ .unknown_builtin = first_token });
                 const next = try eatToken(out_err, text, first_token.end, .l_paren);
-                _ = builtin;
-                _ = next;
-                @panic("todo");
+                const stack_before = vm.stack.items.len;
+                const arg_end = try vm.evalArgs(allocator, out_err, text, next);
+                return .{ try vm.evalBuiltin(out_err, text, first_token.extent(), builtin, stack_before), arg_end };
             },
             .identifier => {
                 const id = text[first_token.start..first_token.end];
@@ -148,10 +187,49 @@ pub const Vm = struct {
                     } }),
                 }
             },
+            .string_literal => return .{ .{ .string_literal = .{
+                .start = first_token.start,
+                .end = first_token.end,
+            } }, first_token.end },
             else => return out_err.set(.{ .unexpected_token = .{
                 .expected = "an expression",
                 .token = first_token,
             } }),
+        }
+    }
+
+    fn evalArgs(
+        vm: *Vm,
+        allocator: std.mem.Allocator,
+        out_err: *VmError,
+        text: []const u8,
+        start: usize,
+    ) error{Vm}!usize {
+        var offset = start;
+        while (true) {
+            const first_token = lex(text, offset);
+            const after_expr = blk: switch (first_token.tag) {
+                .r_paren => return first_token.end,
+                else => {
+                    try vm.stackEnsureUnusedSlot(allocator, out_err);
+                    const value, const end = try vm.eval(allocator, out_err, text, offset);
+                    vm.stackPushAssume(value);
+                    break :blk end;
+                },
+            };
+
+            {
+                const token = lex(text, after_expr);
+                switch (token.tag) {
+                    .r_paren => return token.end,
+                    .comma => {},
+                    else => return out_err.set(.{ .unexpected_token = .{
+                        .expected = "a ',' or close paren ')'",
+                        .token = token,
+                    } }),
+                }
+                offset = token.end;
+            }
         }
     }
 
@@ -173,10 +251,53 @@ pub const Vm = struct {
         } });
         return token.end;
     }
+
+    fn evalBuiltin(
+        vm: *Vm,
+        // allocator: std.mem.Allocator,
+        out_err: *VmError,
+        text: []const u8,
+        builtin_extent: Extent,
+        builtin: Builtin,
+        stack_before: usize,
+    ) error{Vm}!Value {
+        const arg_count = vm.stack.items.len - stack_before;
+        if (arg_count != builtin.argCount()) return out_err.set(.{
+            .builtin_arg_count = .{ .builtin_extent = builtin_extent, .arg_count = arg_count },
+        });
+        switch (builtin) {
+            .@"@LoadAssembly" => {
+                const arg = vm.stack.items[vm.stack.items.len - 1];
+                const extent = switch (arg) {
+                    .string_literal => |e| e,
+                    // else => return out_err.set(.{
+                    //     .builtin_arg_type = .{
+                    //         .builtin = .LoadAssembly,
+                    //         .arg_index = 0,
+                    //         .expected = .string_literal,
+                    //         .actual = arg,
+                    //     },
+                    // }),
+                };
+                const string = text[extent.start + 1 .. extent.end - 1];
+                std.debug.panic("todo: load assembly '{s}'", .{string});
+            },
+        }
+        // if (arg_count != builtin.expectedArgCount())
+        //     _ = vm;
+        // _ = text;
+        // _ = builtin_token;
+        // @panic("todo: evalBuiltin");
+    }
 };
 
 const Builtin = enum {
     @"@LoadAssembly",
+    pub fn argCount(builtin: Builtin) u8 {
+        return switch (builtin) {
+            .@"@LoadAssembly" => 1,
+        };
+    }
 };
 pub const builtins = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@LoadAssembly", .@"@LoadAssembly" },
@@ -186,6 +307,10 @@ const Token = struct {
     tag: Tag,
     start: usize,
     end: usize,
+
+    pub fn extent(t: Token) Extent {
+        return .{ .start = t.start, .end = t.end };
+    }
 
     pub const Tag = enum {
         invalid,
