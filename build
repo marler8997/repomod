@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+import os
+import sys
+import subprocess
+import zipfile
+import shutil
+from pathlib import Path
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DOWNLOADS_DIR = os.path.join(SCRIPT_DIR, "downloads")
+
+def main():
+    bepinex = install_bepinex()
+
+    csc = find_csc()
+    log(f"csc = '{csc}'")
+
+    game_dir = find_game_dir()
+
+    dll = Path(SCRIPT_DIR, "out", "MarlerMod.dll")
+    compile_mod(csc, bepinex, game_dir, dll)
+
+    log("copying game...")
+    local_copy = os.path.join(SCRIPT_DIR, "REPO")
+    if os.path.exists(local_copy):
+        shutil.rmtree(local_copy)
+    shutil.copytree(game_dir, local_copy)
+
+    log("installing bepinx...")
+    install_mod(bepinex, local_copy, "")
+
+    log("installing marlermod...")
+    dll_installed = Path(local_copy, "BepInEx", "plugins", "MarlerMod.dll")
+    if dll_installed.exists():
+        sys.exit("our mod is already installed?")
+    dll_installed.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(dll, dll_installed)
+
+def log(msg):
+    print(f"build: {msg}", file=sys.stderr)
+
+def find_game_dir():
+    return r"C:\Program Files (x86)\Steam\steamapps\common\REPO"
+
+def find_csc():
+    CSC_PATHS = [
+        r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
+        r"C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe",
+    ]
+
+    for path in CSC_PATHS:
+        if os.path.exists(path):
+            return path
+
+    # Try to find it in PATH
+    try:
+        result = subprocess.run(["where", "csc"], capture_output=True, text=True, check=True)
+        return result.stdout.strip().split('\n')[0]
+    except:
+        pass
+
+    log("ERROR: Could not find csc.exe")
+    log("Searched paths:")
+    for path in CSC_PATHS:
+        log(f"  - {path}")
+    sys.exit(1)
+
+def fetch(url, filename):
+    basename = os.path.basename(filename)
+    if os.path.exists(filename):
+        log(f"download '{basename}': already done")
+        return
+    log(f"download '{basename}': executing...")
+    makedirs(os.path.dirname(filename))
+    tmp_filename = filename + ".downloading"
+    remove(tmp_filename)
+    run(None, ["curl", "--location", url, "--output", tmp_filename])
+    os.rename(tmp_filename, filename)
+
+def run(extra_env, *args, **kwargs):
+    if not 'check' in kwargs:
+        kwargs['check'] = True
+
+    cmd_prefix = ''
+    cmd_suffix = ''
+
+    cd_prefix = ''
+    if 'cwd' in kwargs:
+        if IS_WINDOWS:
+            cmd_prefix = 'cmd /c "'
+            cmd_suffix = '"'
+        else:
+            cmd_prefix = '('
+            cmd_suffix = ')'
+        # TODO: should we use & or &&?
+        cd_prefix = f"cd {kwargs['cwd']} && "
+
+    env_prefix = ''
+    if extra_env:
+        kwargs['env'] = {**os.environ, **extra_env}
+        if IS_WINDOWS:
+            cmd_prefix = 'cmd /c "'
+            cmd_suffix = '"'
+            for e in extra_env:
+                env_prefix += f"set {e}={extra_env[e]} && "
+        else:
+            for e in extra_env:
+                env_prefix += f"{e}={extra_env[e]} "
+    log("[RUN] "
+        + cmd_prefix + cd_prefix + env_prefix
+        + subprocess.list2cmdline(*args)
+        + cmd_suffix)
+    sys.stdout.flush()
+    return subprocess.run(*args, **kwargs)
+
+def makedirs(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+def remove(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+def install_bepinex():
+    BEPINEX_VERSION = "5.4.23.4"
+    stem = f"BepInEx_win_x64_{BEPINEX_VERSION}"
+    installed = os.path.join(SCRIPT_DIR, "dep", stem)
+    if not os.path.exists(installed):
+        url = f"https://github.com/BepInEx/BepInEx/releases/download/v{BEPINEX_VERSION}/{stem}.zip"
+        archive = os.path.join(DOWNLOADS_DIR, os.path.basename(url))
+        fetch(url, archive)
+        log(f"unzipping '{archive}'")
+        extracting = installed + ".extracting"
+        try:
+            with zipfile.ZipFile(archive, 'r') as zip_ref:
+                zip_ref.extractall(extracting)
+        except Exception as e:
+            log(f"ERROR: Failed to extract BepInEx: {e}")
+            sys.exit(1)
+        os.rename(extracting, installed)
+    return installed
+
+
+def compile_mod(csc, bepinex, game_dir, dll):
+    bepinex_dll = os.path.join(bepinex, "BepInEx", "core", "BepInEx.dll")
+    harmony_dll = os.path.join(bepinex, "BepInEx", "core", "0Harmony.dll")
+
+    managed = os.path.join(game_dir, "REPO_Data", "Managed")
+    netstandard_dll = os.path.join(managed, "netstandard.dll")  # Add this
+    assembly_csharp_dll = os.path.join(managed, "Assembly-CSharp.dll")
+
+    unity_dll = os.path.join(managed, "UnityEngine.dll")
+    unity_core_dll = os.path.join(managed, "UnityEngine.CoreModule.dll")
+
+    photon_unity = os.path.join(managed, "Photon3Unity3D.dll")
+    photon_realtime = os.path.join(managed, "PhotonRealtime.dll")
+    photon_pun = os.path.join(managed, "PhotonUnityNetworking.dll")
+
+    references = [
+        bepinex_dll,
+        harmony_dll,
+        netstandard_dll,
+        assembly_csharp_dll,
+        unity_dll,
+        unity_core_dll,
+        photon_unity,
+        photon_realtime,
+        photon_pun,
+    ]
+    missing_count = 0
+    for ref in references:
+        if not os.path.exists(ref):
+            log(f"ERROR: DLL '{ref}' does not exist")
+            missing_count += 1
+    if missing_count > 0:
+        sys.exit("missing {missing_count} DLLS")
+    makedirs(os.path.dirname(dll))
+    cmd = [
+        csc,
+        "/target:library",
+        "/out:" + str(dll),
+    ] + [f"/reference:{ref}" for ref in references] + [
+        "MarlerMod.cs"
+    ]
+    log(subprocess.list2cmdline(cmd))
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+
+def install_mod(mod_source, game_out, prefix):
+    for basename in os.listdir(mod_source):
+        path_source = Path(mod_source, basename)
+        path_out = Path(game_out, basename)
+        entry_relative = prefix + basename
+        if path_out.exists():
+            sys.exit("duplicate file '{entry_relative}'")
+        if path_source.is_dir():
+            log(f"mkdir '{entry_relative}'")
+            os.mkdir(path_out)
+            install_mod(path_source, path_out, entry_relative + os.path.sep)
+        elif path_source.is_file():
+            log(f"copy '{entry_relative}'")
+            shutil.copy2(path_source, path_out)
+        else:
+            sys.exit(f"unsupported file type {path_source}")
+
+if __name__ == "__main__":
+    main()
