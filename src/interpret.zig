@@ -6,6 +6,7 @@ const Value = union(enum) {
 
 pub const VmError = union(enum) {
     unexpected_token: struct { expected: [:0]const u8, token: Token },
+    unknown_builtin: Token,
     oom,
     pub fn set(err: *VmError, value: VmError) error{Vm} {
         err.* = value;
@@ -27,10 +28,17 @@ pub const VmError = union(enum) {
                 .unexpected_token => |e| try writer.print(
                     "{d}: syntax error: expected {s} but got token {t} '{s}'",
                     .{
-                        getLineNum(f.text, e.token.loc.start),
+                        getLineNum(f.text, e.token.start),
                         e.expected,
                         e.token.tag,
-                        f.text[e.token.loc.start..e.token.loc.end],
+                        f.text[e.token.start..e.token.end],
+                    },
+                ),
+                .unknown_builtin => |token| try writer.print(
+                    "{d}: unknown builtin '{s}'",
+                    .{
+                        getLineNum(f.text, token.start),
+                        f.text[token.start..token.end],
                     },
                 ),
                 .oom => try writer.writeAll("out of memory"),
@@ -72,17 +80,17 @@ pub const Vm = struct {
     ) error{Vm}!void {
         var offset: usize = 0;
         while (true) {
-            const token = lex(text, offset);
-            offset = token.loc.end;
-            switch (token.tag) {
+            const first_token = lex(text, offset);
+            offset = first_token.end;
+            switch (first_token.tag) {
                 .identifier => {
-                    const token2 = lex(text, offset);
-                    offset = token2.loc.end;
-                    switch (token2.tag) {
+                    const id = text[first_token.start..first_token.end];
+                    const second_token = lex(text, offset);
+                    offset = second_token.end;
+                    switch (second_token.tag) {
                         .equal => {
-                            const value = try vm.eval(allocator, out_err, text, token2.loc.end);
-                            const symbol = text[token.loc.start..token.loc.end];
-                            const entry = vm.symbol_table.getOrPut(allocator, symbol) catch |e| return out_err.setOom(e);
+                            const value = try vm.eval(allocator, out_err, text, second_token.end);
+                            const entry = vm.symbol_table.getOrPut(allocator, id) catch |e| return out_err.setOom(e);
                             if (entry.found_existing) {
                                 entry.value_ptr.deinit();
                             }
@@ -91,14 +99,14 @@ pub const Vm = struct {
                         .l_paren => @panic("todo: implement function call"),
                         else => return out_err.set(.{ .unexpected_token = .{
                             .expected = "an '=' or '(' after identifier",
-                            .token = token2,
+                            .token = second_token,
                         } }),
                     }
                 },
                 .keyword_fn => @panic("todo: implement fn"),
                 else => return out_err.set(.{ .unexpected_token = .{
                     .expected = "an identifier or 'fn' keyword",
-                    .token = token,
+                    .token = first_token,
                 } }),
             }
         }
@@ -112,24 +120,72 @@ pub const Vm = struct {
         start: usize,
     ) error{Vm}!Value {
         const first_token = lex(text, start);
+        // offset = first_token.end;
         _ = allocator;
         _ = vm;
-        // _ = vm;
         // _ = text;
         // _ = start;
         // @panic("todo: implement eval");
         switch (first_token.tag) {
+            .builtin => {
+                const id = text[first_token.start..first_token.end];
+                const builtin = builtins.get(id) orelse return out_err.set(.{ .unknown_builtin = first_token });
+                const next = try eatToken(out_err, text, first_token.end, .l_paren);
+                _ = builtin;
+                _ = next;
+                @panic("todo");
+            },
+            .identifier => {
+                const id = text[first_token.start..first_token.end];
+                const second_token = lex(text, first_token.end);
+                switch (second_token.tag) {
+                    .l_paren => {
+                        std.debug.panic("todo: lookup function '{s}'", .{id});
+                    },
+                    else => return out_err.set(.{ .unexpected_token = .{
+                        .expected = "a '(' to start function args",
+                        .token = first_token,
+                    } }),
+                }
+            },
             else => return out_err.set(.{ .unexpected_token = .{
                 .expected = "an expression",
                 .token = first_token,
             } }),
         }
     }
+
+    fn eatToken(
+        out_err: *VmError,
+        text: []const u8,
+        start: usize,
+        what: enum { l_paren },
+    ) error{Vm}!usize {
+        const token = lex(text, start);
+        const expected_tag: Token.Tag = switch (what) {
+            .l_paren => .l_paren,
+        };
+        if (token.tag != expected_tag) return out_err.set(.{ .unexpected_token = .{
+            .expected = "a " ++ switch (what) {
+                .l_paren => "an open paren '('",
+            },
+            .token = token,
+        } });
+        return token.end;
+    }
 };
+
+const Builtin = enum {
+    @"@LoadAssembly",
+};
+pub const builtins = std.StaticStringMap(Builtin).initComptime(.{
+    .{ "@LoadAssembly", .@"@LoadAssembly" },
+});
 
 const Token = struct {
     tag: Tag,
-    loc: Loc,
+    start: usize,
+    end: usize,
 
     pub const Tag = enum {
         invalid,
@@ -270,22 +326,10 @@ fn lex(text: []const u8, lex_start: usize) Token {
 
     while (true) {
         if (index >= text.len) return switch (state) {
-            .start => .{
-                .tag = .eof,
-                .loc = .{ .start = index, .end = index },
-            },
-            .identifier => |start| .{
-                .tag = .identifier,
-                .loc = .{ .start = start, .end = index },
-            },
-            .builtin => |start| .{
-                .tag = .builtin,
-                .loc = .{ .start = start, .end = index },
-            },
-            .saw_at_sign, .string_literal => |start| .{
-                .tag = .invalid,
-                .loc = .{ .start = start, .end = index },
-            },
+            .start => .{ .tag = .eof, .start = index, .end = index },
+            .identifier => |start| .{ .tag = .identifier, .start = start, .end = index },
+            .builtin => |start| .{ .tag = .builtin, .start = start, .end = index },
+            .saw_at_sign, .string_literal => |start| .{ .tag = .invalid, .start = start, .end = index },
         };
         switch (state) {
             .start => {
@@ -304,18 +348,18 @@ fn lex(text: []const u8, lex_start: usize) Token {
                         state = .{ .saw_at_sign = index };
                         index += 1;
                     },
-                    '=' => return .{ .tag = .equal, .loc = .{ .start = index, .end = index + 1 } },
+                    '=' => return .{ .tag = .equal, .start = index, .end = index + 1 },
                     // '!' => continue :state .bang,
                     // '|' => continue :state .pipe,
-                    '(' => return .{ .tag = .l_paren, .loc = .{ .start = index, .end = index + 1 } },
-                    ')' => return .{ .tag = .r_paren, .loc = .{ .start = index, .end = index + 1 } },
-                    '[' => return .{ .tag = .l_bracket, .loc = .{ .start = index, .end = index + 1 } },
-                    ']' => return .{ .tag = .r_bracket, .loc = .{ .start = index, .end = index + 1 } },
+                    '(' => return .{ .tag = .l_paren, .start = index, .end = index + 1 },
+                    ')' => return .{ .tag = .r_paren, .start = index, .end = index + 1 },
+                    '[' => return .{ .tag = .l_bracket, .start = index, .end = index + 1 },
+                    ']' => return .{ .tag = .r_bracket, .start = index, .end = index + 1 },
                     // ';' => {
                     //     result.tag = .semicolon;
                     //     self.index += 1;
                     // },
-                    ',' => return .{ .tag = .comma, .loc = .{ .start = index, .end = index + 1 } },
+                    ',' => return .{ .tag = .comma, .start = index, .end = index + 1 },
                     // '?' => {
                     //     result.tag = .question_mark;
                     //     self.index += 1;
@@ -334,13 +378,13 @@ fn lex(text: []const u8, lex_start: usize) Token {
                     //     result.tag = .multiline_string_literal_line;
                     //     continue :state .backslash;
                     // },
-                    '{' => return .{ .tag = .l_brace, .loc = .{ .start = index, .end = index + 1 } },
-                    '}' => return .{ .tag = .r_brace, .loc = .{ .start = index, .end = index + 1 } },
+                    '{' => return .{ .tag = .l_brace, .start = index, .end = index + 1 },
+                    '}' => return .{ .tag = .r_brace, .start = index, .end = index + 1 },
                     // '~' => {
                     //     result.tag = .tilde;
                     //     self.index += 1;
                     // },
-                    '.' => return .{ .tag = .period, .loc = .{ .start = index, .end = index + 1 } },
+                    '.' => return .{ .tag = .period, .start = index, .end = index + 1 },
                     // '-' => continue :state .minus,
                     // '/' => continue :state .slash,
                     // '&' => continue :state .ampersand,
@@ -349,10 +393,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
                     //     self.index += 1;
                     //     continue :state .int;
                     // },
-                    else => return .{
-                        .tag = .invalid,
-                        .loc = .{ .start = index, .end = index + 1 },
-                    },
+                    else => return .{ .tag = .invalid, .start = index, .end = index + 1 },
                 }
             },
             .identifier => |start| {
@@ -360,10 +401,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
                     'a'...'z', 'A'...'Z', '_', '0'...'9' => index += 1,
                     else => {
                         const string = text[start..index];
-                        return .{
-                            .tag = Token.getKeyword(string) orelse .identifier,
-                            .loc = .{ .start = start, .end = index },
-                        };
+                        return .{ .tag = Token.getKeyword(string) orelse .identifier, .start = start, .end = index };
                     },
                 }
             },
@@ -378,29 +416,17 @@ fn lex(text: []const u8, lex_start: usize) Token {
                         state = .{ .builtin = start };
                         index += 1;
                     },
-                    else => return .{
-                        .tag = .invalid,
-                        .loc = .{ .start = start, .end = index },
-                    },
+                    else => return .{ .tag = .invalid, .start = start, .end = index },
                 }
             },
             .builtin => |start| switch (text[index]) {
                 'a'...'z', 'A'...'Z', '_', '0'...'9' => index += 1,
-                else => return .{
-                    .tag = .builtin,
-                    .loc = .{ .start = start, .end = index },
-                },
+                else => return .{ .tag = .builtin, .start = start, .end = index },
             },
             .string_literal => |start| {
                 switch (text[index]) {
-                    '"' => return .{
-                        .tag = .string_literal,
-                        .loc = .{ .start = start, .end = index + 1 },
-                    },
-                    '\n' => return .{
-                        .tag = .invalid,
-                        .loc = .{ .start = start, .end = index },
-                    },
+                    '"' => return .{ .tag = .string_literal, .start = start, .end = index + 1 },
+                    '\n' => return .{ .tag = .invalid, .start = start, .end = index },
                     else => index += 1,
                     // '\\' => continue :state .string_literal_backslash,
                     // '"' => self.index += 1,
@@ -419,7 +445,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
     //             if (self.index == self.buffer.len) {
     //                 return .{
     //                     .tag = .eof,
-    //                     .loc = .{
+    //
     //                         .start = self.index,
     //                         .end = self.index,
     //                     },
@@ -430,7 +456,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
     //         },
     //         ' ', '\n', '\t', '\r' => {
     //             self.index += 1;
-    //             result.loc.start = self.index;
+    //             result.start = self.index;
     //             continue :state .start;
     //         },
     //         '"' => {
@@ -527,7 +553,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
     //             },
     //             '\n' => {
     //                 self.index += 1;
-    //                 result.loc.start = self.index;
+    //                 result.start = self.index;
     //                 continue :state .start;
     //             },
     //             else => continue :state .invalid,
@@ -679,7 +705,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
     //         switch (self.buffer[self.index]) {
     //             'a'...'z', 'A'...'Z', '_', '0'...'9' => continue :state .identifier,
     //             else => {
-    //                 const ident = self.buffer[result.loc.start..self.index];
+    //                 const ident = self.buffer[result.start..self.index];
     //                 if (Token.getKeyword(ident)) |tag| {
     //                     result.tag = tag;
     //                 }
@@ -967,7 +993,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
     //                     continue :state .invalid;
     //                 } else return .{
     //                     .tag = .eof,
-    //                     .loc = .{
+    //
     //                         .start = self.index,
     //                         .end = self.index,
     //                     },
@@ -979,7 +1005,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
     //             },
     //             '\n' => {
     //                 self.index += 1;
-    //                 result.loc.start = self.index;
+    //                 result.start = self.index;
     //                 continue :state .start;
     //             },
     //             '/' => continue :state .doc_comment_start,
@@ -1019,7 +1045,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
     //                     continue :state .invalid;
     //                 } else return .{
     //                     .tag = .eof,
-    //                     .loc = .{
+    //
     //                         .start = self.index,
     //                         .end = self.index,
     //                     },
@@ -1027,7 +1053,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
     //             },
     //             '\n' => {
     //                 self.index += 1;
-    //                 result.loc.start = self.index;
+    //                 result.start = self.index;
     //                 continue :state .start;
     //             },
     //             '\r' => continue :state .expect_newline,
@@ -1106,7 +1132,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
     //     },
     // }
 
-    // result.loc.end = self.index;
+    // result.end = self.index;
     // return result;
 }
 
@@ -1115,13 +1141,13 @@ const TokenIterator = struct {
     offset: usize = 0,
     pub fn next(it: *TokenIterator) Token {
         const token = lex(it.text, it.offset);
-        it.offset = token.loc.end;
+        it.offset = token.end;
         return token;
     }
     pub fn expect(it: *TokenIterator, tag: Token.Tag, str: []const u8) !void {
         const token = it.next();
         try std.testing.expectEqual(tag, token.tag);
-        try std.testing.expectEqualSlices(u8, str, it.text[token.loc.start..token.loc.end]);
+        try std.testing.expectEqualSlices(u8, str, it.text[token.start..token.end]);
     }
 };
 
