@@ -114,6 +114,25 @@ pub export fn _DllMainCRTStartup(
         win32.DLL_PROCESS_ATTACH => {
             // !!! WARNING !!! do not log here...logging uses APIs that we probably
             // aren't supposed to call at this phase
+            if (false) win32.OutputDebugStringW(win32.L("MarlerMod: proces attach\n"));
+
+            // var dll_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            // const dll_path = try getDllPath(&dll_path_buf);
+            // std.log.info("DLL loaded from: {s}", .{dll_path});
+
+            // At this point we're running inside the game process
+            // But we can't directly call Unity APIs yet - we need to hook into
+            // the game's main thread
+
+            // For now, just log success and prepare for the C# side to take over
+            // In a full implementation, we would:
+            // 1. Find the Mono/IL2CPP runtime
+            // 2. Load our managed DLL (ScriptEngine.dll)
+            // 3. Call into C# to set up the rest
+
+            // std.log.info("Native initialization complete", .{});
+            // std.log.info("TODO: Hook into Mono runtime and load managed DLL", .{});
+
         },
         win32.DLL_THREAD_ATTACH => {},
         win32.DLL_THREAD_DETACH => {},
@@ -127,81 +146,26 @@ pub export fn _DllMainCRTStartup(
     return 1; // success
 }
 
-// export fn DllMain(
-//     hinstDLL: win32.HINSTANCE,
-//     fdwReason: u32,
-//     lpvReserved: ?*anyopaque,
-// ) callconv(.winapi) win32.BOOL {
-//     _ = lpvReserved;
-//     _ = hinstDLL;
+// fn getDllPath(buf: []u8) ![]const u8 {
+//     var path_buf_w: [std.fs.max_path_bytes]u16 = undefined;
 
-//     const DLL_PROCESS_ATTACH = 1;
-//     const DLL_PROCESS_DETACH = 0;
+//     // Get the path of this DLL
+//     // Pass null as hModule to get the path of the current module (our DLL)
+//     const len = win32.GetModuleFileNameW(
+//         null,
+//         &path_buf_w,
+//         path_buf_w.len,
+//     );
 
-//     switch (fdwReason) {
-//         DLL_PROCESS_ATTACH => {
-//             // Initialize when DLL is loaded
-//             initialize() catch |err| {
-//                 std.log.err("Initialization failed: {}", .{err});
-//             };
-//         },
-//         DLL_PROCESS_DETACH => {
-//             // Cleanup when DLL is unloaded
-//             cleanup();
-//         },
-//         else => {},
+//     if (len == 0) {
+//         return error.GetModuleFileNameFailed;
 //     }
 
-//     return win32.TRUE;
+//     // Convert from UTF-16 to UTF-8 without allocator
+//     const path_w = path_buf_w[0..len :0];
+//     const utf8_len = std.unicode.utf16LeToUtf8(buf, path_w) catch return error.Utf16ToUtf8Failed;
+//     return buf[0..utf8_len];
 // }
-
-fn initialize() !void {
-    std.log.info("=== MOD FRAMEWORK INITIALIZING ===", .{});
-
-    // Get the DLL's directory (where the launcher is) without allocator
-    var dll_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dll_path = try getDllPath(&dll_path_buf);
-
-    std.log.info("DLL loaded from: {s}", .{dll_path});
-
-    // At this point we're running inside the game process
-    // But we can't directly call Unity APIs yet - we need to hook into
-    // the game's main thread
-
-    // For now, just log success and prepare for the C# side to take over
-    // In a full implementation, we would:
-    // 1. Find the Mono/IL2CPP runtime
-    // 2. Load our managed DLL (ScriptEngine.dll)
-    // 3. Call into C# to set up the rest
-
-    std.log.info("Native initialization complete", .{});
-    std.log.info("TODO: Hook into Mono runtime and load managed DLL", .{});
-}
-
-fn cleanup() void {
-    std.log.info("=== MOD FRAMEWORK SHUTTING DOWN ===", .{});
-}
-
-fn getDllPath(buf: []u8) ![]const u8 {
-    var path_buf_w: [std.fs.max_path_bytes]u16 = undefined;
-
-    // Get the path of this DLL
-    // Pass null as hModule to get the path of the current module (our DLL)
-    const len = win32.GetModuleFileNameW(
-        null,
-        &path_buf_w,
-        path_buf_w.len,
-    );
-
-    if (len == 0) {
-        return error.GetModuleFileNameFailed;
-    }
-
-    // Convert from UTF-16 to UTF-8 without allocator
-    const path_w = path_buf_w[0..len :0];
-    const utf8_len = std.unicode.utf16LeToUtf8(buf, path_w) catch return error.Utf16ToUtf8Failed;
-    return buf[0..utf8_len];
-}
 
 // Export a function that the C# managed code can call
 // This allows us to bridge between native and managed
