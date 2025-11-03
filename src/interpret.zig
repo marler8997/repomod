@@ -1,10 +1,24 @@
-pub fn go(text: []const u8) void {
+pub fn go(text: []const u8) union(enum) {
+    unexpected_token: struct {
+        expected: [:0]const u8,
+        token: Token,
+    },
+} {
     std.log.err("TODO: interpret module source '{f}'", .{std.zig.fmtString(text)});
     var offset: usize = 0;
     while (true) {
         const token = lex(text, offset);
-        if (true) std.debug.panic("todo: handle token {}", .{token});
         offset = token.loc.end;
+        switch (token.tag) {
+            .keyword_set => {
+                @panic("todo: implement set");
+            },
+            .keyword_fn => @panic("todo: implement fn"),
+            else => return .{ .unexpected_token = .{
+                .expected = "set or fn",
+                .token = token,
+            } },
+        }
     }
 }
 

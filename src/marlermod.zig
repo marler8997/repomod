@@ -113,11 +113,31 @@ const Mod = struct {
     stale: bool,
     state: union(enum) {
         initial,
-        err: Error,
-        text_loaded: struct {
-            text: []u8,
-        },
+        err_no_text: ErrorNoText,
+        have_text: TextState,
     } = .initial,
+
+    const TextState = struct {
+        text: []u8,
+        mod_state: ModState,
+        pub fn deinitTakeText(text_state: *TextState) []u8 {
+            text_state.mod_state.deinit();
+            text_state.mod_state = .unprocessed;
+            const text = text_state.text;
+            text_state.* = undefined;
+            return text;
+        }
+    };
+    const ModState = union(enum) {
+        unprocessed,
+        err,
+        pub fn deinit(state: *ModState) void {
+            switch (state.*) {
+                .unprocessed, .err => {},
+            }
+            state.* = undefined;
+        }
+    };
 
     fn create(name_slice: []const u8, name_len: u8) error{OutOfMemory}!*Mod {
         const mod = try std.heap.page_allocator.create(Mod);
@@ -134,10 +154,10 @@ const Mod = struct {
 
     pub fn delete(mod: *Mod) void {
         switch (mod.state) {
-            .initial, .err => {},
-            .text_loaded => |t| {
-                std.heap.page_allocator.free(t.text);
-                mod.state = undefined;
+            .initial, .err_no_text => {},
+            .have_text => |*state| {
+                std.heap.page_allocator.free(state.text);
+                state.* = undefined;
             },
         }
         global.mods.remove(&mod.list_node);
@@ -145,11 +165,11 @@ const Mod = struct {
         std.heap.page_allocator.destroy(mod);
     }
 
-    const Error = union(enum) {
+    const ErrorNoText = union(enum) {
         open_file: std.fs.File.OpenError,
         // read_file: (error{OutOfMemory} || std.fs.File.ReadError),
         read_file: anyerror,
-        pub fn eql(self: Error, other: Error) bool {
+        pub fn eql(self: ErrorNoText, other: ErrorNoText) bool {
             return switch (self) {
                 .open_file => |self_e| switch (other) {
                     .open_file => |other_e| self_e == other_e,
@@ -167,52 +187,60 @@ const Mod = struct {
         return mod.name_buf[0..mod.name_len];
     }
 
-    fn logNewError(mod: *Mod, err: Error) void {
+    fn logNewErrorNoText(mod: *Mod, err: ErrorNoText) void {
         switch (err) {
             .open_file => |e| std.log.err("open mod file '{s}' failed with {t}", .{ mod.name(), e }),
             .read_file => |e| std.log.err("read mod file '{s}' failed with {t}", .{ mod.name(), e }),
         }
     }
 
-    pub fn onError(mod: *Mod, err: Error) void {
+    pub fn onErrorNoText(mod: *Mod, err: ErrorNoText) void {
         switch (mod.state) {
             .initial => {},
-            .err => |current_error| if (current_error.eql(err)) return,
-            .text_loaded => |t| {
-                std.heap.page_allocator.free(t.text);
+            .err_no_text => |current_error| if (current_error.eql(err)) return,
+            .have_text => |state| {
+                std.heap.page_allocator.free(state.text);
                 mod.state = undefined;
             },
+            // .text_loaded => |t| {
+            //     std.heap.page_allocator.free(t.text);
+            //     mod.state = undefined;
+            // },
         }
-        mod.logNewError(err);
-        mod.state = .{ .err = err };
+        mod.logNewErrorNoText(err);
+        mod.state = .{ .err_no_text = err };
     }
 
     pub fn updateText(mod: *Mod, new_text: []const u8) void {
         switch (mod.state) {
-            .initial, .err => {},
-            .text_loaded => |t| {
-                if (std.mem.eql(u8, t.text, new_text)) return;
+            .initial, .err_no_text => {},
+            .have_text => |*state| {
+                if (std.mem.eql(u8, state.text, new_text)) return;
                 std.log.info("mod '{s}' text updated", .{mod.name()});
-                if (std.heap.page_allocator.resize(t.text, new_text.len)) {
+                if (std.heap.page_allocator.resize(state.text, new_text.len)) {
                     std.log.debug("  resized!", .{});
-                    @memcpy(t.text.ptr[0..new_text.len], new_text);
-                    mod.state = .{ .text_loaded = .{ .text = t.text.ptr[0..new_text.len] } };
+                    @memcpy(state.text.ptr[0..new_text.len], new_text);
+                    const text = state.deinitTakeText();
+                    mod.state = .{ .have_text = .{
+                        .text = text.ptr[0..new_text.len],
+                        .mod_state = .unprocessed,
+                    } };
                     return;
                 }
                 std.log.debug("  can't resize", .{});
-                std.heap.page_allocator.free(t.text);
+                std.heap.page_allocator.free(state.text);
                 mod.state = undefined;
             },
         }
         const copy = std.heap.page_allocator.dupe(u8, new_text) catch |e| switch (e) {
             error.OutOfMemory => {
                 std.log.err("can't save mod source, out of memory", .{});
-                mod.state = .{ .err = .{ .read_file = e } };
+                mod.state = .{ .err_no_text = .{ .read_file = e } };
                 return;
             },
         };
         std.log.info("mod '{s}' source loaded", .{mod.name()});
-        mod.state = .{ .text_loaded = .{ .text = copy } };
+        mod.state = .{ .have_text = .{ .text = copy, .mod_state = .unprocessed } };
     }
 };
 
@@ -265,12 +293,12 @@ fn updateMods(scratch: std.mem.Allocator) void {
 
         {
             var file = dir.openFile(entry.name, .{}) catch |err| {
-                mod.onError(.{ .open_file = err });
+                mod.onErrorNoText(.{ .open_file = err });
                 continue;
             };
             defer file.close();
             const new_text = file.readToEndAlloc(scratch, std.math.maxInt(usize)) catch |err| {
-                mod.onError(.{ .read_file = err });
+                mod.onErrorNoText(.{ .read_file = err });
                 continue;
             };
             defer scratch.free(new_text);
@@ -278,10 +306,27 @@ fn updateMods(scratch: std.mem.Allocator) void {
         }
 
         switch (mod.state) {
-            .initial => {},
-            .err => {},
-            .text_loaded => |t| {
-                @import("interpret.zig").go(t.text);
+            .initial, .err_no_text => {},
+            .have_text => |*state| {
+                switch (state.mod_state) {
+                    .unprocessed => {
+                        switch (@import("interpret.zig").go(state.text)) {
+                            .unexpected_token => |e| {
+                                std.log.err(
+                                    "mod '{s}' syntax error: expected {s} but got token {t} '{s}'",
+                                    .{
+                                        mod.name(),
+                                        e.expected,
+                                        e.token.tag,
+                                        state.text[e.token.loc.start..e.token.loc.end],
+                                    },
+                                );
+                                state.mod_state = .err;
+                            },
+                        }
+                    },
+                    .err => {},
+                }
             },
         }
     }
