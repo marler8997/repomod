@@ -1,4 +1,2 @@
-/downloads/
-/dep/
-/REPO/
-/out/
+.zig-cache/
+zig-out/
