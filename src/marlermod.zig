@@ -119,23 +119,11 @@ const Mod = struct {
 
     const HaveText = struct {
         text: []u8,
-        mod_state: ModState,
+        processed: bool,
         pub fn deinitTakeText(have_text: *HaveText) []u8 {
-            have_text.mod_state.deinit();
-            have_text.mod_state = .unprocessed;
             const text = have_text.text;
             have_text.* = undefined;
             return text;
-        }
-    };
-    const ModState = union(enum) {
-        unprocessed,
-        err,
-        pub fn deinit(state: *ModState) void {
-            switch (state.*) {
-                .unprocessed, .err => {},
-            }
-            state.* = undefined;
         }
     };
 
@@ -219,7 +207,7 @@ const Mod = struct {
                     const text = state.deinitTakeText();
                     mod.state = .{ .have_text = .{
                         .text = text.ptr[0..new_text.len],
-                        .mod_state = .unprocessed,
+                        .processed = false,
                     } };
                     return;
                 }
@@ -236,7 +224,7 @@ const Mod = struct {
             },
         };
         std.log.info("mod '{s}' source loaded", .{mod.name()});
-        mod.state = .{ .have_text = .{ .text = copy, .mod_state = .unprocessed } };
+        mod.state = .{ .have_text = .{ .text = copy, .processed = false } };
     }
 };
 
@@ -303,30 +291,14 @@ fn updateMods(scratch: std.mem.Allocator) void {
 
         switch (mod.state) {
             .initial, .err_no_text => {},
-            .have_text => |*state| {
-                switch (state.mod_state) {
-                    .unprocessed => {
-                        var vm: interpret.Vm = .{
-                            // .allocator = state.mod_state.arena.alloator(),
-                        };
-                        switch (vm.eval(state.text)) {
-                            .unexpected_token => |e| {
-                                std.log.err(
-                                    "{s}:{d}: syntax error: expected {s} but got token {t} '{s}'",
-                                    .{
-                                        mod.name(),
-                                        getLineNum(state.text, e.token.loc.start),
-                                        e.expected,
-                                        e.token.tag,
-                                        state.text[e.token.loc.start..e.token.loc.end],
-                                    },
-                                );
-                                state.mod_state = .err;
-                            },
-                        }
-                    },
-                    .err => {},
-                }
+            .have_text => |*state| if (!state.processed) {
+                var vm: interpret.Vm = .{};
+                defer vm.deinit(scratch);
+                var err: interpret.VmError = undefined;
+                vm.interpret(scratch, &err, state.text) catch {
+                    std.log.err("{s}:{f}", .{ mod.name(), err.fmt(state.text) });
+                };
+                state.processed = true;
             },
         }
     }
@@ -335,14 +307,6 @@ fn updateMods(scratch: std.mem.Allocator) void {
         std.log.info("deleting mod '{s}'", .{mod.name()});
         mod.delete();
     }
-}
-
-fn getLineNum(text: []const u8, offset: usize) u32 {
-    var line_num: u32 = 1;
-    for (text[0..@min(text.len, offset)]) |c| {
-        if (c == '\n') line_num += 1;
-    }
-    return line_num;
 }
 
 fn findStaleMod() ?*Mod {

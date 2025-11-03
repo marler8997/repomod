@@ -1,17 +1,75 @@
-const Value = struct {};
+const Value = union(enum) {
+    pub fn deinit(value: *Value) void {
+        switch (value.*) {}
+    }
+};
+
+pub const VmError = union(enum) {
+    unexpected_token: struct { expected: [:0]const u8, token: Token },
+    oom,
+    pub fn set(err: *VmError, value: VmError) error{Vm} {
+        err.* = value;
+        return error.Vm;
+    }
+    pub fn setOom(err: *VmError, e: error{OutOfMemory}) error{Vm} {
+        e catch {};
+        err.* = .oom;
+        return error.Vm;
+    }
+    pub fn fmt(err: *const VmError, text: []const u8) Fmt {
+        return .{ .err = err, .text = text };
+    }
+    pub const Fmt = struct {
+        err: *const VmError,
+        text: []const u8,
+        pub fn format(f: *const Fmt, writer: *std.Io.Writer) error{WriteFailed}!void {
+            switch (f.err.*) {
+                .unexpected_token => |e| try writer.print(
+                    "{d}: syntax error: expected {s} but got token {t} '{s}'",
+                    .{
+                        getLineNum(f.text, e.token.loc.start),
+                        e.expected,
+                        e.token.tag,
+                        f.text[e.token.loc.start..e.token.loc.end],
+                    },
+                ),
+                .oom => try writer.writeAll("out of memory"),
+            }
+        }
+    };
+};
+
+fn getLineNum(text: []const u8, offset: usize) u32 {
+    var line_num: u32 = 1;
+    for (text[0..@min(text.len, offset)]) |c| {
+        if (c == '\n') line_num += 1;
+    }
+    return line_num;
+}
 
 pub const Vm = struct {
-    // allocator: std.mem.Allocator,
-    // symbol_table: std.StringHashMapUnmanaged(Value),
+    symbol_table: std.StringHashMapUnmanaged(SymbolTableEntry) = .{},
+    const SymbolTableEntry = struct {
+        value: Value,
+        pub fn deinit(entry: *SymbolTableEntry) void {
+            entry.value.deinit();
+        }
+        pub fn init(entry: *SymbolTableEntry, value: Value) void {
+            entry.value = value;
+        }
+    };
 
-    pub fn eval(vm: *Vm, text: []const u8) union(enum) {
-        unexpected_token: struct {
-            expected: [:0]const u8,
-            token: Token,
-        },
-    } {
-        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        _ = vm;
+    pub fn deinit(vm: *Vm, allocator: std.mem.Allocator) void {
+        vm.symbol_table.deinit(allocator);
+        vm.* = undefined;
+    }
+
+    pub fn interpret(
+        vm: *Vm,
+        allocator: std.mem.Allocator,
+        out_err: *VmError,
+        text: []const u8,
+    ) error{Vm}!void {
         var offset: usize = 0;
         while (true) {
             const token = lex(text, offset);
@@ -22,22 +80,35 @@ pub const Vm = struct {
                     offset = token2.loc.end;
                     switch (token2.tag) {
                         .equal => {
-                            @panic("todo: implement assign");
+                            const value = try vm.eval(text, token2.loc.end);
+                            const symbol = text[token.loc.start..token.loc.end];
+                            const entry = vm.symbol_table.getOrPut(allocator, symbol) catch |e| return out_err.setOom(e);
+                            if (entry.found_existing) {
+                                entry.value_ptr.deinit();
+                            }
+                            entry.value_ptr.init(value);
                         },
                         .l_paren => @panic("todo: implement function call"),
-                        else => return .{ .unexpected_token = .{
+                        else => return out_err.set(.{ .unexpected_token = .{
                             .expected = "an '=' or '(' after identifier",
                             .token = token2,
-                        } },
+                        } }),
                     }
                 },
                 .keyword_fn => @panic("todo: implement fn"),
-                else => return .{ .unexpected_token = .{
+                else => return out_err.set(.{ .unexpected_token = .{
                     .expected = "an identifier or 'fn' keyword",
                     .token = token,
-                } },
+                } }),
             }
         }
+    }
+
+    fn eval(vm: *Vm, text: []const u8, start: usize) error{Vm}!Value {
+        _ = vm;
+        _ = text;
+        _ = start;
+        @panic("todo: implement eval");
     }
 };
 
