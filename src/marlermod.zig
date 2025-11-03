@@ -74,9 +74,15 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
     std.log.info("Init Thread running!", .{});
 
+    var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+
     // TODO: do this in a loop
     while (true) {
-        updateMods();
+        updateMods(scratch.allocator());
+        if (!scratch.reset(.retain_capacity)) {
+            std.log.warn("reset scratch allocator failed?", .{});
+        }
+
         std.Thread.sleep(std.time.ns_per_s * 5);
     }
 
@@ -103,12 +109,122 @@ const Mod = struct {
     list_node: std.DoublyLinkedList.Node,
     name_len: u8,
     name_buf: [255]u8,
-    pub fn name(self: *const Mod) []const u8 {
-        return self.name_buf[0..self.name_len];
+
+    stale: bool,
+    state: union(enum) {
+        initial,
+        err: Error,
+        text_loaded: struct {
+            text: []u8,
+        },
+    } = .initial,
+
+    fn create(name_slice: []const u8, name_len: u8) error{OutOfMemory}!*Mod {
+        const mod = try std.heap.page_allocator.create(Mod);
+        errdefer std.heap.page_allocator.destroy(mod);
+        mod.* = .{
+            .list_node = .{},
+            .name_len = name_len,
+            .name_buf = undefined,
+            .stale = false,
+        };
+        @memcpy(mod.name_buf[0..name_len], name_slice);
+        return mod;
+    }
+
+    pub fn delete(mod: *Mod) void {
+        switch (mod.state) {
+            .initial, .err => {},
+            .text_loaded => |t| {
+                std.heap.page_allocator.free(t.text);
+                mod.state = undefined;
+            },
+        }
+        global.mods.remove(&mod.list_node);
+        mod.* = undefined;
+        std.heap.page_allocator.destroy(mod);
+    }
+
+    const Error = union(enum) {
+        open_file: std.fs.File.OpenError,
+        // read_file: (error{OutOfMemory} || std.fs.File.ReadError),
+        read_file: anyerror,
+        pub fn eql(self: Error, other: Error) bool {
+            return switch (self) {
+                .open_file => |self_e| switch (other) {
+                    .open_file => |other_e| self_e == other_e,
+                    else => false,
+                },
+                .read_file => |self_e| switch (other) {
+                    .read_file => |other_e| self_e == other_e,
+                    else => false,
+                },
+            };
+        }
+    };
+
+    pub fn name(mod: *const Mod) []const u8 {
+        return mod.name_buf[0..mod.name_len];
+    }
+
+    fn logNewError(mod: *Mod, err: Error) void {
+        switch (err) {
+            .open_file => |e| std.log.err("open mod file '{s}' failed with {t}", .{ mod.name(), e }),
+            .read_file => |e| std.log.err("read mod file '{s}' failed with {t}", .{ mod.name(), e }),
+        }
+    }
+
+    pub fn onError(mod: *Mod, err: Error) void {
+        switch (mod.state) {
+            .initial => {},
+            .err => |current_error| if (current_error.eql(err)) return,
+            .text_loaded => |t| {
+                std.heap.page_allocator.free(t.text);
+                mod.state = undefined;
+            },
+        }
+        mod.logNewError(err);
+        mod.state = .{ .err = err };
+    }
+
+    pub fn updateText(mod: *Mod, new_text: []const u8) void {
+        switch (mod.state) {
+            .initial, .err => {},
+            .text_loaded => |t| {
+                if (std.mem.eql(u8, t.text, new_text)) return;
+                std.log.info("mod '{s}' text updated", .{mod.name()});
+                if (std.heap.page_allocator.resize(t.text, new_text.len)) {
+                    std.log.debug("  resized!", .{});
+                    @memcpy(t.text.ptr[0..new_text.len], new_text);
+                    mod.state = .{ .text_loaded = .{ .text = t.text.ptr[0..new_text.len] } };
+                    return;
+                }
+                std.log.debug("  can't resize", .{});
+                std.heap.page_allocator.free(t.text);
+                mod.state = undefined;
+            },
+        }
+        const copy = std.heap.page_allocator.dupe(u8, new_text) catch |e| switch (e) {
+            error.OutOfMemory => {
+                std.log.err("can't save mod source, out of memory", .{});
+                mod.state = .{ .err = .{ .read_file = e } };
+                return;
+            },
+        };
+        std.log.info("mod '{s}' source loaded", .{mod.name()});
+        mod.state = .{ .text_loaded = .{ .text = copy } };
     }
 };
 
-fn updateMods() void {
+fn updateMods(scratch: std.mem.Allocator) void {
+    {
+        var maybe_mod = global.mods.first;
+        while (maybe_mod) |list_node| : (maybe_mod = list_node.next) {
+            const mod: *Mod = @fieldParentPtr("list_node", list_node);
+            mod.stale = true;
+        }
+    }
+
     const mod_path = "C:\\temp\\marlermods";
     std.log.info("loading mods from '{s}'...", .{mod_path});
     var dir = std.fs.cwd().openDir(mod_path, .{ .iterate = true }) catch |err| {
@@ -136,7 +252,7 @@ fn updateMods() void {
                 }
             }
 
-            const mod = newMod(entry.name, mod_name_len) catch |err| switch (err) {
+            const mod = Mod.create(entry.name, mod_name_len) catch |err| switch (err) {
                 error.OutOfMemory => {
                     std.log.err("can't load new mod '{s}' (out of memory)", .{entry.name});
                     continue;
@@ -145,20 +261,44 @@ fn updateMods() void {
             global.mods.append(&mod.list_node);
             break :blk mod;
         };
-        std.log.info("todo: update mod '{s}'", .{mod.name()});
+        mod.stale = false;
+
+        {
+            var file = dir.openFile(entry.name, .{}) catch |err| {
+                mod.onError(.{ .open_file = err });
+                continue;
+            };
+            defer file.close();
+            const new_text = file.readToEndAlloc(scratch, std.math.maxInt(usize)) catch |err| {
+                mod.onError(.{ .read_file = err });
+                continue;
+            };
+            defer scratch.free(new_text);
+            mod.updateText(new_text);
+        }
+
+        switch (mod.state) {
+            .initial => {},
+            .err => {},
+            .text_loaded => |t| {
+                std.log.err("TODO: interpret module source '{f}'", .{std.zig.fmtString(t.text)});
+            },
+        }
+    }
+
+    while (findStaleMod()) |mod| {
+        std.log.info("deleting mod '{s}'", .{mod.name()});
+        mod.delete();
     }
 }
 
-fn newMod(name: []const u8, name_len: u8) error{OutOfMemory}!*Mod {
-    const mod = try std.heap.page_allocator.create(Mod);
-    errdefer std.heap.page_allocator.destroy(mod);
-    mod.* = .{
-        .list_node = .{},
-        .name_len = name_len,
-        .name_buf = undefined,
-    };
-    @memcpy(mod.name_buf[0..name_len], name);
-    return mod;
+fn findStaleMod() ?*Mod {
+    var maybe_mod = global.mods.first;
+    while (maybe_mod) |list_node| : (maybe_mod = list_node.next) {
+        const mod: *Mod = @fieldParentPtr("list_node", list_node);
+        if (mod.stale) return mod;
+    }
+    return null;
 }
 
 // Export a function that the C# managed code can call
