@@ -1,15 +1,17 @@
-using BepInEx;
-using BepInEx.Logging;
-using UnityEngine;
-using HarmonyLib;
+// using BepInEx;
+// using BepInEx.Logging;
+// using UnityEngine;
+// using HarmonyLib;
 using System;
+using System.Collections.Generic;
+using System.Reflection;
 
 namespace MarlerMod
 {
-    [BepInPlugin("com.marler.upgrademod", "Marler Upgrade Mod", "1.0.0")]
-    public class Plugin : BaseUnityPlugin
+    [BepInEx.BepInPlugin("com.marler.upgrademod", "Marler Upgrade Mod", "1.0.0")]
+    public class Plugin : BepInEx.BaseUnityPlugin
     {
-        private static ManualLogSource logger;
+        private static BepInEx.Logging.ManualLogSource logger;
         private static bool commandsRegistered = false;
 
         private void Awake()
@@ -20,7 +22,7 @@ namespace MarlerMod
             try
             {
                 logger.LogInfo("Applying Harmony patches...");
-                Harmony harmony = new Harmony("com.marler.upgrademod");
+                HarmonyLib.Harmony harmony = new HarmonyLib.Harmony("com.marler.upgrademod");
                 harmony.PatchAll();
                 logger.LogInfo("Harmony patches applied successfully!");
             }
@@ -31,7 +33,7 @@ namespace MarlerMod
             }
         }
 
-        [HarmonyPatch(typeof(DebugCommandHandler), "Awake")]
+        [HarmonyLib.HarmonyPatch(typeof(DebugCommandHandler), "Awake")]
         public class DebugCommandHandler_Awake_Patch
         {
             static void Postfix()
@@ -112,22 +114,11 @@ namespace MarlerMod
 
         private static void ExecuteUpgradeCommand(UpgradeKind kind, string[] args)
         {
-            string steamID = GetLocalPlayerSteamID();
-            if (string.IsNullOrEmpty(steamID))
-            {
-                logger.LogWarning("Failed to get Steam ID");
-                SendConsoleResponse("Failed to get Steam ID");
-                return;
-            }
-
-            logger.LogInfo("Using Steam ID: " + steamID);
-
             if (args.Length < 1)
             {
                 SendConsoleResponse("Usage: " + kind.ToString().ToLower() + " <level>");
                 return;
             }
-
             int desiredLevel;
             if (!int.TryParse(args[0], out desiredLevel))
             {
@@ -135,28 +126,56 @@ namespace MarlerMod
                 return;
             }
 
-            int currentLevel = GetCurrentLevel(kind, steamID);
-            if (currentLevel == -1)
+            List<string> steamIDs = GetAllPlayerSteamIDs();
+            if (steamIDs.Count == 0)
             {
+                logger.LogWarning("failed to get any player Steam IDs");
+                SendConsoleResponse("failed to get any player Steam IDs");
                 return;
             }
 
-            int newLevel = SetNewLevel(kind, steamID, desiredLevel, currentLevel);
-            if (newLevel == -1)
+            logger.LogInfo("found " + steamIDs.Count + " player(s) to upgrade");
+
+            int successCount = 0;
+            int failCount = 0;
+
+            foreach (string steamID in steamIDs)
             {
-                return;
+                logger.LogInfo("Upgrading player " + steamID);
+
+                int currentLevel = GetCurrentLevel(kind, steamID);
+                if (currentLevel == -1)
+                {
+                    failCount++;
+                    continue;
+                }
+
+                int newLevel = SetNewLevel(kind, steamID, desiredLevel, currentLevel);
+                if (newLevel == -1)
+                {
+                    failCount++;
+                    continue;
+                }
+
+                if (newLevel == desiredLevel)
+                {
+                    logger.LogInfo(string.Format("SUCCESS: {0} set to level {1} for player {2}", kind, desiredLevel, steamID));
+                    successCount++;
+                }
+                else
+                {
+                    logger.LogWarning(string.Format("UNEXPECTED: {0} set to {1} but returned {2} for player {3}", kind, desiredLevel, newLevel, steamID));
+                    successCount++;
+                }
             }
 
-            if (newLevel == desiredLevel)
+            string response = string.Format("{0} upgraded to level {1} for {2} player(s)", kind, desiredLevel, successCount);
+            if (failCount > 0)
             {
-                logger.LogInfo(string.Format("SUCCESS: {0} set to level {1}", kind, desiredLevel));
-                SendConsoleResponse(string.Format("{0} upgraded to level {1}", kind, desiredLevel));
+                response += string.Format(" ({0} failed)", failCount);
             }
-            else
-            {
-                logger.LogWarning(string.Format("UNEXPECTED: {0} set to {1} but returned {2}", kind, desiredLevel, newLevel));
-                SendConsoleResponse(string.Format("{0} is now at level {1} (expected {2})", kind, newLevel, desiredLevel));
-            }
+
+            SendConsoleResponse(response);
         }
 
         private static int GetCurrentLevel(UpgradeKind kind, string steamID)
@@ -216,28 +235,10 @@ namespace MarlerMod
             logger.LogInfo("Console message: " + message);
         }
 
-        private static string GetLocalPlayerSteamID()
+        private static List<string> GetAllPlayerSteamIDs()
         {
-            // Method 1: Try PhotonView on local player
-            string steamID = TryGetSteamIDFromPhoton();
-            if (!string.IsNullOrEmpty(steamID))
-            {
-                return steamID;
-            }
+            List<string> steamIDs = new List<string>();
 
-            // Method 2: Try SteamManager
-            steamID = TryGetSteamIDFromSteamManager();
-            if (!string.IsNullOrEmpty(steamID))
-            {
-                return steamID;
-            }
-
-            logger.LogWarning("All methods failed to get Steam ID");
-            return string.Empty;
-        }
-
-        private static string TryGetSteamIDFromPhoton()
-        {
             try
             {
                 PlayerController[] players = UnityEngine.Object.FindObjectsOfType<PlayerController>();
@@ -246,67 +247,21 @@ namespace MarlerMod
                 foreach (PlayerController player in players)
                 {
                     Photon.Pun.PhotonView photonView = player.GetComponent<Photon.Pun.PhotonView>();
-                    if (photonView != null && photonView.IsMine && photonView.Owner != null)
+                    if (photonView != null && photonView.Owner != null)
                     {
-                        logger.LogInfo("Found local player - UserId: " + photonView.Owner.UserId);
-                        return photonView.Owner.UserId;
+                        string steamID = photonView.Owner.UserId;
+                        logger.LogInfo("Found player - UserId: " + steamID);
+                        steamIDs.Add(steamID);
                     }
                 }
             }
             catch (Exception e)
             {
-                logger.LogInfo("PhotonView method failed: " + e.Message);
+                logger.LogError("Failed to get all player Steam IDs: " + e.Message);
+                logger.LogError(e.StackTrace);
             }
 
-            return string.Empty;
-        }
-
-        private static string TryGetSteamIDFromSteamManager()
-        {
-            try
-            {
-                Type steamManagerType = Type.GetType("Steamworks.SteamManager, Assembly-CSharp");
-                if (steamManagerType == null)
-                {
-                    return string.Empty;
-                }
-
-                System.Reflection.PropertyInfo initProp = steamManagerType.GetProperty("Initialized");
-                if (initProp == null)
-                {
-                    return string.Empty;
-                }
-
-                object initialized = initProp.GetValue(null, null);
-                if (initialized is bool && (bool)initialized)
-                {
-                    Type steamUserType = Type.GetType("Steamworks.SteamUser, Assembly-CSharp");
-                    if (steamUserType == null)
-                    {
-                        return string.Empty;
-                    }
-
-                    System.Reflection.MethodInfo getIdMethod = steamUserType.GetMethod("GetSteamID");
-                    if (getIdMethod == null)
-                    {
-                        return string.Empty;
-                    }
-
-                    object steamID = getIdMethod.Invoke(null, null);
-                    if (steamID != null)
-                    {
-                        string id = steamID.ToString();
-                        logger.LogInfo("Got Steam ID from SteamManager: " + id);
-                        return id;
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                logger.LogInfo("SteamManager method failed: " + e.Message);
-            }
-
-            return string.Empty;
+            return steamIDs;
         }
     }
 }
