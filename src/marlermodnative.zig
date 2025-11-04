@@ -591,74 +591,66 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
     win32.ExitProcess(0xff);
 }
 
-// Mono API types (opaque pointers)
-const MonoAssembly = opaque {};
-const MonoImage = opaque {};
-const MonoClass = opaque {};
-const MonoMethod = opaque {};
-const MonoObject = opaque {};
-const MonoThread = opaque {};
+// fn initializeManagedRuntime(mono_mod: win32.HINSTANCE) error{MissingProc}!void {
+//     std.log.info("initializing managed runtime...", .{});
+//     _ = mono_mod;
 
-fn initializeManagedRuntime(mono_mod: win32.HINSTANCE) error{MissingProc}!void {
-    std.log.info("initializing managed runtime...", .{});
-    _ = mono_mod;
+//     // const mono_thread_attach = win32.GetProcAddress(mono_mod, "mono_thread_attach") orelse return error.MissingFunction;
+//     // const mono_domain_assembly_open = win32.GetProcAddress(mono_mod, "mono_domain_assembly_open") orelse return error.MissingFunction;
+//     // const mono_assembly_get_image = win32.GetProcAddress(mono_mod, "mono_assembly_get_image") orelse return error.MissingFunction;
+//     // const mono_class_from_name = win32.GetProcAddress(mono_mod, "mono_class_from_name") orelse return error.MissingFunction;
+//     // const mono_class_get_method_from_name = win32.GetProcAddress(mono_mod, "mono_class_get_method_from_name") orelse return error.MissingFunction;
+//     // const mono_runtime_invoke = win32.GetProcAddress(mono_mod, "mono_runtime_invoke") orelse return error.MissingFunction;
 
-    // const mono_thread_attach = win32.GetProcAddress(mono_mod, "mono_thread_attach") orelse return error.MissingFunction;
-    // const mono_domain_assembly_open = win32.GetProcAddress(mono_mod, "mono_domain_assembly_open") orelse return error.MissingFunction;
-    // const mono_assembly_get_image = win32.GetProcAddress(mono_mod, "mono_assembly_get_image") orelse return error.MissingFunction;
-    // const mono_class_from_name = win32.GetProcAddress(mono_mod, "mono_class_from_name") orelse return error.MissingFunction;
-    // const mono_class_get_method_from_name = win32.GetProcAddress(mono_mod, "mono_class_get_method_from_name") orelse return error.MissingFunction;
-    // const mono_runtime_invoke = win32.GetProcAddress(mono_mod, "mono_runtime_invoke") orelse return error.MissingFunction;
+//     // // Cast to proper function types
+//     // const thread_attach: *const fn (?*mono.Domain) callconv(.c) ?*MonoThread = @ptrCast(mono_thread_attach);
+//     // const domain_assembly_open: *const fn (?*mono.Domain, [*:0]const u8) callconv(.c) ?*MonoAssembly = @ptrCast(mono_domain_assembly_open);
+//     // const assembly_get_image: *const fn (?*MonoAssembly) callconv(.c) ?*MonoImage = @ptrCast(mono_assembly_get_image);
+//     // const class_from_name: *const fn (?*MonoImage, [*:0]const u8, [*:0]const u8) callconv(.c) ?*MonoClass = @ptrCast(mono_class_from_name);
+//     // const class_get_method_from_name: *const fn (?*MonoClass, [*:0]const u8, c_int) callconv(.c) ?*MonoMethod = @ptrCast(mono_class_get_method_from_name);
+//     // const runtime_invoke: *const fn (?*MonoMethod, ?*MonoObject, ?*?*anyopaque, ?*?*MonoObject) callconv(.c) ?*MonoObject = @ptrCast(mono_runtime_invoke);
 
-    // // Cast to proper function types
-    // const thread_attach: *const fn (?*mono.Domain) callconv(.c) ?*MonoThread = @ptrCast(mono_thread_attach);
-    // const domain_assembly_open: *const fn (?*mono.Domain, [*:0]const u8) callconv(.c) ?*MonoAssembly = @ptrCast(mono_domain_assembly_open);
-    // const assembly_get_image: *const fn (?*MonoAssembly) callconv(.c) ?*MonoImage = @ptrCast(mono_assembly_get_image);
-    // const class_from_name: *const fn (?*MonoImage, [*:0]const u8, [*:0]const u8) callconv(.c) ?*MonoClass = @ptrCast(mono_class_from_name);
-    // const class_get_method_from_name: *const fn (?*MonoClass, [*:0]const u8, c_int) callconv(.c) ?*MonoMethod = @ptrCast(mono_class_get_method_from_name);
-    // const runtime_invoke: *const fn (?*MonoMethod, ?*MonoObject, ?*?*anyopaque, ?*?*MonoObject) callconv(.c) ?*MonoObject = @ptrCast(mono_runtime_invoke);
+//     // Get root domain and attach thread
+//     // const domain = mono_get_root_domain() orelse errExit(
+//     //     "mono_get_root_domain returned NULL",
+//     //     .{},
+//     // );
+//     // std.log.info("Mono root domain: 0x{x}", .{@intFromPtr(domain)});
 
-    // Get root domain and attach thread
-    // const domain = mono_get_root_domain() orelse errExit(
-    //     "mono_get_root_domain returned NULL",
-    //     .{},
-    // );
-    // std.log.info("Mono root domain: 0x{x}", .{@intFromPtr(domain)});
+//     // const thread = thread_attach(domain) orelse return error.ThreadAttachFailed;
+//     // std.log.info("Thread attached: 0x{x}", .{@intFromPtr(thread)});
 
-    // const thread = thread_attach(domain) orelse return error.ThreadAttachFailed;
-    // std.log.info("Thread attached: 0x{x}", .{@intFromPtr(thread)});
+//     // // Load managed assembly
+//     // const assembly_path = "C:\\temp\\MarlerModManaged.dll";
+//     // std.log.info("Loading managed assembly: {s}", .{assembly_path});
+//     // const assembly = domain_assembly_open(domain, assembly_path) orelse return error.AssemblyLoadFailed;
 
-    // // Load managed assembly
-    // const assembly_path = "C:\\temp\\MarlerModManaged.dll";
-    // std.log.info("Loading managed assembly: {s}", .{assembly_path});
-    // const assembly = domain_assembly_open(domain, assembly_path) orelse return error.AssemblyLoadFailed;
+//     // const image = assembly_get_image(assembly) orelse return error.GetImageFailed;
 
-    // const image = assembly_get_image(assembly) orelse return error.GetImageFailed;
+//     // // Find class: MarlerMod.ModLoader
+//     // const namespace = "MarlerMod";
+//     // const class_name = "ModLoader";
+//     // std.log.info("Finding class: {s}.{s}", .{ namespace, class_name });
+//     // const class = class_from_name(image, namespace, class_name) orelse return error.ClassNotFound;
 
-    // // Find class: MarlerMod.ModLoader
-    // const namespace = "MarlerMod";
-    // const class_name = "ModLoader";
-    // std.log.info("Finding class: {s}.{s}", .{ namespace, class_name });
-    // const class = class_from_name(image, namespace, class_name) orelse return error.ClassNotFound;
+//     // // Find method: Initialize
+//     // const method_name = "Initialize";
+//     // std.log.info("Finding method: {s}", .{method_name});
+//     // const method = class_get_method_from_name(class, method_name, 0) orelse return error.MethodNotFound;
 
-    // // Find method: Initialize
-    // const method_name = "Initialize";
-    // std.log.info("Finding method: {s}", .{method_name});
-    // const method = class_get_method_from_name(class, method_name, 0) orelse return error.MethodNotFound;
+//     // // Invoke the method
+//     // std.log.info("Invoking {s}.{s}.{s}()", .{ namespace, class_name, method_name });
+//     // var exception: ?*MonoObject = null;
+//     // _ = runtime_invoke(method, null, null, &exception);
 
-    // // Invoke the method
-    // std.log.info("Invoking {s}.{s}.{s}()", .{ namespace, class_name, method_name });
-    // var exception: ?*MonoObject = null;
-    // _ = runtime_invoke(method, null, null, &exception);
+//     // if (exception != null) {
+//     //     std.log.err("Exception occurred during method invocation", .{});
+//     //     return error.InvocationException;
+//     // }
 
-    // if (exception != null) {
-    //     std.log.err("Exception occurred during method invocation", .{});
-    //     return error.InvocationException;
-    // }
-
-    // std.log.info("Managed code initialized successfully!", .{});
-    @panic("todo");
-}
+//     // std.log.info("Managed code initialized successfully!", .{});
+//     @panic("todo");
+// }
 
 const std = @import("std");
 const win32 = @import("win32").everything;

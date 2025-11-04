@@ -1,8 +1,8 @@
 const global = struct {
-    pub var mono: Mono = .uninitialized;
+    pub var mono_state: MonoState = .uninitialized;
 };
 
-const Mono = union(enum) {
+const MonoState = union(enum) {
     uninitialized,
     mod_not_found,
     init_failed: struct {
@@ -28,7 +28,7 @@ pub export fn wWinMain(
     _ = pCmdLine;
     _ = nCmdShow;
 
-    global.mono = initMono();
+    global.mono_state = initMono();
 
     const CLASS_NAME = win32.L("TestGameWindow");
     const wc = win32.WNDCLASSW{
@@ -83,7 +83,7 @@ fn WindowProc(hwnd: win32.HWND, msg: u32, wParam: win32.WPARAM, lParam: win32.LP
             var y: i32 = 20;
             win32.textOutA(hdc, 20, y, "TestGame with Mono Runtime");
             y += 25;
-            switch (global.mono) {
+            switch (global.mono_state) {
                 .uninitialized => {
                     lineOut(hdc, 0, "Mono not initialized.");
                 },
@@ -122,38 +122,35 @@ fn lineOutFmt(hdc: win32.HDC, row: i32, comptime fmt: []const u8, args: anytype)
 }
 
 const MonoDomain = opaque {};
+const MonoAssembly = opaque {};
 
 const MonoFuncs = struct {
     jit_init: *const fn ([*:0]const u8) callconv(.c) ?*MonoDomain,
-    pub fn init(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!MonoFuncs {
+    set_assemblies_path: *const fn ([*:0]const u8) callconv(.c) void,
+    domain_assembly_open: *const fn (*MonoDomain, [*:0]const u8) callconv(.c) ?*MonoAssembly,
+    pub fn init(mod: win32.HINSTANCE, proc_ref: *[:0]const u8) error{ProcNotFound}!MonoFuncs {
         return MonoFuncs{
-            .jit_init = try maybeGetMonoProc(proc_ref, mod, fn ([*:0]const u8) callconv(.c) ?*MonoDomain, "mono_jit_init"),
+            .jit_init = try monoload.get(mod, .jit_init, proc_ref),
+            .set_assemblies_path = try monoload.get(mod, .set_assemblies_path, proc_ref),
+            .domain_assembly_open = try monoload.get(mod, .domain_assembly_open, proc_ref),
         };
-    }
-    fn maybeGetMonoProc(proc_ref: *[:0]const u8, module: win32.HINSTANCE, comptime T: type, name: [:0]const u8) error{ProcNotFound}!*const T {
-        proc_ref.* = name;
-        return getMonoProc(module, T, name);
     }
 };
 
-fn getMonoProc(module: win32.HINSTANCE, comptime T: type, name: [:0]const u8) error{ProcNotFound}!*const T {
-    return @ptrCast(win32.GetProcAddress(module, name) orelse switch (win32.GetLastError()) {
-        .ERROR_PROC_NOT_FOUND => return error.ProcNotFound,
-        else => |e| std.debug.panic("GetProcAddress '{s}' with mono DLL failed, error={f}", .{ name, e }),
-    });
-}
-
-fn initMono() Mono {
+fn initMono() MonoState {
     const MonoDll = struct {
         kind: enum { name, repo_game },
         load_string: [:0]const u16,
     };
+
+    const repo_game_dir = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\REPO";
+
     const mono_dlls = [_]MonoDll{
         // .{ .kind = .name, .load_string = win32.L("mono-2.0-bdwgc.dll") },
         // win32.L("mono.dll"),
         // win32.L("mono-2.0-sgen.dll"),
         .{ .kind = .repo_game, .load_string = win32.L(
-            "C:\\Program Files (x86)\\Steam\\steamapps\\common\\REPO\\MonoBleedingEdge\\EmbedRuntime\\mono-2.0-bdwgc.dll",
+            repo_game_dir ++ "\\MonoBleedingEdge\\EmbedRuntime\\mono-2.0-bdwgc.dll",
         ) },
     };
 
@@ -172,29 +169,20 @@ fn initMono() Mono {
     };
     std.log.info("successfully loaded '{f}'", .{fmtW(dll.load_string)});
 
-    switch (dll.kind) {
-        .name => {},
-        .repo_game => {
-            const name = "mono_set_assemblies_path";
-            const mono_set_assemblies_path = getMonoProc(
-                module,
-                fn ([*:0]const u8) callconv(.c) void,
-                name,
-            ) catch return .{ .init_failed = .{
-                .dll_string = dll.load_string,
-                .module = module,
-                .reason = .{ .proc_not_found = name },
-            } };
-            mono_set_assemblies_path("C:\\Program Files (x86)\\Steam\\steamapps\\common\\REPO\\REPO_Data\\Managed");
-        },
-    }
-
     var missing_proc: [:0]const u8 = undefined;
-    const funcs = MonoFuncs.init(&missing_proc, module) catch return .{ .init_failed = .{
+    const funcs = MonoFuncs.init(module, &missing_proc) catch return .{ .init_failed = .{
         .dll_string = dll.load_string,
         .module = module,
         .reason = .{ .proc_not_found = missing_proc },
     } };
+
+    const repo_managed = repo_game_dir ++ "\\REPO_Data\\Managed";
+    switch (dll.kind) {
+        .name => {},
+        .repo_game => {
+            funcs.set_assemblies_path(repo_managed);
+        },
+    }
 
     std.log.info("mono_jit_init...", .{});
     const domain = funcs.jit_init("TestGameDomain") orelse {
@@ -202,9 +190,24 @@ fn initMono() Mono {
         return .{ .init_failed = .{ .dll_string = dll.load_string, .module = module, .reason = .mono_jit_init } };
     };
     std.log.info("Mono domain created: 0x{x}", .{@intFromPtr(domain)});
+
+    switch (dll.kind) {
+        .name => {},
+        .repo_game => {
+            const filename = repo_managed ++ "\\Assembly-CSharp.dll";
+            if (funcs.domain_assembly_open(domain, filename)) |assembly| {
+                _ = assembly;
+                std.log.info("Assembly-CSharp: loaded", .{});
+            } else {
+                std.log.info("Assembly-CSharp: not loaded", .{});
+            }
+        },
+    }
+
     return .{ .loaded = .{ .dll_string = dll.load_string, .module = module } };
 }
 
 const std = @import("std");
 const win32 = @import("win32").everything;
 const fmtW = std.unicode.fmtUtf16Le;
+const monoload = @import("monoload.zig").template(MonoFuncs);

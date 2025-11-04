@@ -3,7 +3,7 @@ const Vm = @This();
 mono_funcs: *const mono.Funcs,
 mono_domain: *mono.Domain,
 allocator: std.mem.Allocator,
-err: VmError,
+err: Error,
 text: []const u8,
 
 symbol_table: std.StringHashMapUnmanaged(Value) = .{},
@@ -44,7 +44,7 @@ const Type = enum {
 
 const max_load_assembly_string = 15;
 
-pub const VmError = union(enum) {
+pub const Error = union(enum) {
     unexpected_token: struct { expected: [:0]const u8, token: Token },
     unknown_builtin: Token,
     builtin_arg_count: struct { builtin_extent: Extent, arg_count: usize },
@@ -54,87 +54,28 @@ pub const VmError = union(enum) {
         expected: Type,
         actual: Type,
     },
-    load_assembly_string_too_long: Extent,
-    load_assembly_failed: Extent,
+    // an identifier was assigned a void value
+    void_assignment: struct {
+        id_extent: Extent,
+    },
+    void_argument: struct {
+        arg_index: u32,
+        first_arg_token: Token,
+    },
+    assembly_not_found: Extent,
     oom,
-    pub fn set(err: *VmError, value: VmError) error{Vm} {
+    pub fn set(err: *Error, value: Error) error{Vm} {
         err.* = value;
         return error.Vm;
     }
-    pub fn setOom(err: *VmError, e: error{OutOfMemory}) error{Vm} {
+    pub fn setOom(err: *Error, e: error{OutOfMemory}) error{Vm} {
         e catch {};
         err.* = .oom;
         return error.Vm;
     }
-    pub fn fmt(err: *const VmError, text: []const u8) Fmt {
+    pub fn fmt(err: *const Error, text: []const u8) ErrorFmt {
         return .{ .err = err, .text = text };
     }
-    pub const Fmt = struct {
-        err: *const VmError,
-        text: []const u8,
-        pub fn format(f: *const Fmt, writer: *std.Io.Writer) error{WriteFailed}!void {
-            switch (f.err.*) {
-                .unexpected_token => |e| try writer.print(
-                    "{d}: syntax error: expected {s} but got token {t} '{s}'",
-                    .{
-                        getLineNum(f.text, e.token.start),
-                        e.expected,
-                        e.token.tag,
-                        f.text[e.token.start..e.token.end],
-                    },
-                ),
-                .unknown_builtin => |token| try writer.print(
-                    "{d}: unknown builtin '{s}'",
-                    .{
-                        getLineNum(f.text, token.start),
-                        f.text[token.start..token.end],
-                    },
-                ),
-                .builtin_arg_count => |b| {
-                    const builtin_str = f.text[b.builtin_extent.start..b.builtin_extent.end];
-                    const builtin = builtins.get(builtin_str).?;
-                    const arg_count = builtin.argCount();
-                    const arg_suffix: []const u8 = if (arg_count == 1) "" else "s";
-                    try writer.print(
-                        "{d}: builtin '{s}' requires {} arg{s} but got {}",
-                        .{
-                            getLineNum(f.text, b.builtin_extent.start),
-                            builtin_str,
-                            arg_count,
-                            arg_suffix,
-                            b.arg_count,
-                        },
-                    );
-                },
-                .builtin_arg_type => |b| {
-                    const builtin_str = f.text[b.builtin_extent.start..b.builtin_extent.end];
-                    try writer.print(
-                        "{d}: builtin '{s}' argument {} type mismatch,  expected '{s}' but got '{s}'",
-                        .{
-                            getLineNum(f.text, b.builtin_extent.start),
-                            builtin_str,
-                            b.arg_index + 1,
-                            @tagName(b.expected),
-                            @tagName(b.actual),
-                        },
-                    );
-                },
-                .load_assembly_string_too_long => |token| try writer.print(
-                    "{d}: @LoadAssembly string too long ({} bytes but max is {}) {s}",
-                    .{
-                        getLineNum(f.text, token.start),
-                        token.end - token.start - 2,
-                        max_load_assembly_string,
-                        f.text[token.start..token.end],
-                    },
-                ),
-                .load_assembly_failed => {
-                    //
-                },
-                .oom => try writer.writeAll("out of memory"),
-            }
-        }
-    };
 };
 
 fn getLineNum(text: []const u8, offset: usize) u32 {
@@ -160,7 +101,7 @@ pub fn deinit(vm: *Vm, allocator: std.mem.Allocator) void {
     vm.* = undefined;
 }
 
-fn stackEnsureUnusedSlot(vm: *Vm, allocator: std.mem.Allocator, out_err: *VmError) error{Vm}!void {
+fn stackEnsureUnusedSlot(vm: *Vm, allocator: std.mem.Allocator, out_err: *Error) error{Vm}!void {
     vm.stack.ensureUnusedCapacity(allocator, 1) catch return out_err.set(.oom);
 }
 fn stackPushAssume(vm: *Vm, value: Value) void {
@@ -174,9 +115,8 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
         offset = first_token.end;
         switch (first_token.tag) {
             .builtin => {
-                var value, offset = try vm.evalExpr(first_token.start);
-                // TODO: what do we do with this value?
-                value.deinit();
+                var maybe_value, offset = try vm.evalExpr(first_token.start);
+                if (maybe_value) |*value| value.deinit();
             },
             .identifier => {
                 const id = vm.text[first_token.start..first_token.end];
@@ -184,12 +124,15 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
                 offset = second_token.end;
                 switch (second_token.tag) {
                     .equal => {
-                        var value, offset = try vm.evalExpr(second_token.end);
+                        var maybe_value, offset = try vm.evalExpr(second_token.end);
+                        if (maybe_value == null) return vm.err.set(.{ .void_assignment = .{
+                            .id_extent = first_token.extent(),
+                        } });
                         const entry = vm.symbol_table.getOrPut(vm.allocator, id) catch |e| return vm.err.setOom(e);
                         if (entry.found_existing) {
                             entry.value_ptr.deinit();
                         }
-                        value.moveInto(entry.value_ptr);
+                        maybe_value.?.moveInto(entry.value_ptr);
                     },
                     .l_paren => @panic("todo: implement function call"),
                     else => return vm.err.set(.{ .unexpected_token = .{
@@ -207,7 +150,7 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
     }
 }
 
-fn evalExpr(vm: *Vm, start: usize) error{Vm}!struct { Value, usize } {
+fn evalExpr(vm: *Vm, start: usize) error{Vm}!struct { ?Value, usize } {
     const first_token = lex(vm.text, start);
     // offset = first_token.end;
     // _ = allocator;
@@ -249,15 +192,19 @@ fn evalExpr(vm: *Vm, start: usize) error{Vm}!struct { Value, usize } {
 }
 
 fn evalArgs(vm: *Vm, start: usize) error{Vm}!usize {
+    var arg_index: u32 = 0;
     var offset = start;
-    while (true) {
+    while (true) : (arg_index += 1) {
         const first_token = lex(vm.text, offset);
         const after_expr = blk: switch (first_token.tag) {
             .r_paren => return first_token.end,
             else => {
                 try vm.stackEnsureUnusedSlot(vm.allocator, &vm.err);
-                const value, const end = try vm.evalExpr(offset);
-                vm.stackPushAssume(value);
+                const maybe_value, const end = try vm.evalExpr(offset);
+                vm.stackPushAssume(maybe_value orelse return vm.err.set(.{ .void_argument = .{
+                    .arg_index = arg_index,
+                    .first_arg_token = first_token,
+                } }));
                 break :blk end;
             },
         };
@@ -278,7 +225,7 @@ fn evalArgs(vm: *Vm, start: usize) error{Vm}!usize {
 }
 
 fn eatToken(
-    out_err: *VmError,
+    out_err: *Error,
     text: []const u8,
     start: usize,
     what: enum { l_paren },
@@ -301,12 +248,20 @@ fn evalBuiltin(
     builtin_extent: Extent,
     builtin: Builtin,
     stack_before: usize,
-) error{Vm}!Value {
+) error{Vm}!?Value {
     const arg_count = vm.stack.items.len - stack_before;
     if (arg_count != builtin.argCount()) return vm.err.set(.{
         .builtin_arg_count = .{ .builtin_extent = builtin_extent, .arg_count = arg_count },
     });
     switch (builtin) {
+        .@"@Void" => return null,
+        .@"@LogAssemblies" => {
+            var context: LogAssemblies = .{ .vm = vm, .index = 0 };
+            std.log.info("mono_assembly_foreach:", .{});
+            vm.mono_funcs.assembly_foreach(&logAssemblies, &context);
+            std.log.info("mono_assembly_foreach done", .{});
+            return null;
+        },
         .@"@LoadAssembly" => {
             const arg = vm.stack.items[vm.stack.items.len - 1];
             const extent = switch (arg) {
@@ -320,34 +275,99 @@ fn evalBuiltin(
                     },
                 }),
             };
-            const string = vm.text[extent.start + 1 .. extent.end - 1];
-            if (string.len > max_load_assembly_string) return vm.err.set(.{ .load_assembly_string_too_long = extent });
-            var string_buf: [max_load_assembly_string + 1]u8 = undefined;
-            @memcpy(string_buf[0..string.len], string);
-            string_buf[string.len] = 0;
-            std.log.info("loading assembly '{s}'...", .{string});
-            return .{ .assembly = vm.mono_funcs.domain_assembly_open(vm.mono_domain, string_buf[0..string.len :0]) orelse {
-                std.log.info("load assembly '{s}' failed", .{string});
-                return vm.err.set(.{ .load_assembly_failed = extent });
-            } };
+            const slice = vm.text[extent.start + 1 .. extent.end - 1];
+            var context: FindAssembly = .{
+                .vm = vm,
+                .index = 0,
+                .needle = slice,
+                .match = null,
+            };
+            vm.mono_funcs.assembly_foreach(&findAssembly, &context);
+            if (context.match) |match| return .{ .assembly = match };
+            return vm.err.set(.{ .assembly_not_found = extent });
+            // if (slice.len > max_load_assembly_string) return vm.err.set(.{ .load_assembly_string_too_long = extent });
+            // var string_buf: [max_load_assembly_string + 1]u8 = undefined;
+            // @memcpy(string_buf[0..slice.len], slice);
+            // string_buf[slice.len] = 0;
+            // const cstr: [*:0]const u8 = string_buf[0..slice.len :0];
+
+            // std.log.info("loading assembly '{s}'...", .{std.mem.span(cstr)});
+
+            // return .{ .assembly = vm.mono_funcs.domain_assembly_open(vm.mono_domain, cstr) orelse {
+            //     std.log.info("mono_domain_assembly_open '{s}' failed", .{std.mem.span(cstr)});
+            //     return vm.err.set(.{ .load_assembly_failed = extent });
+            // } };
         },
     }
-    // if (arg_count != builtin.expectedArgCount())
-    //     _ = vm;
-    // _ = text;
-    // _ = builtin_token;
-    // @panic("todo: evalBuiltin");
+}
+
+const FindAssembly = struct {
+    vm: *Vm,
+    index: usize,
+    needle: []const u8,
+    match: ?*mono.Assembly,
+};
+fn findAssembly(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
+    const assembly: *mono.Assembly = @ptrCast(assembly_opaque);
+    const ctx: *FindAssembly = @ptrCast(@alignCast(user_data));
+    defer ctx.index += 1;
+    const name = ctx.vm.mono_funcs.assembly_get_name(assembly) orelse {
+        std.log.err("  assembly[{}] get name failed", .{ctx.index});
+        return;
+    };
+    const str = ctx.vm.mono_funcs.assembly_name_get_name(name) orelse {
+        std.log.err(
+            "  assembly[{}] mono_assembly_name_get_name failed (assembly_ptr=0x{x}, name_ptr=0x{x})",
+            .{ ctx.index, @intFromPtr(assembly), @intFromPtr(name) },
+        );
+        return;
+    };
+    const slice = std.mem.span(str);
+    if (std.mem.eql(u8, slice, ctx.needle)) {
+        ctx.match = assembly;
+    }
+    // std.log.info("  assembly[{}] name='{s}'", .{ ctx.index, std.mem.span(str) });
+}
+
+const LogAssemblies = struct {
+    vm: *Vm,
+    index: usize,
+};
+fn logAssemblies(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
+    const assembly: *mono.Assembly = @ptrCast(assembly_opaque);
+    const ctx: *LogAssemblies = @ptrCast(@alignCast(user_data));
+    defer ctx.index += 1;
+    const name = ctx.vm.mono_funcs.assembly_get_name(assembly) orelse {
+        std.log.err("  assembly[{}] get name failed", .{ctx.index});
+        return;
+    };
+    const str = ctx.vm.mono_funcs.assembly_name_get_name(name) orelse {
+        std.log.err(
+            "  assembly[{}] mono_assembly_name_get_name failed (assembly_ptr=0x{x}, name_ptr=0x{x})",
+            .{ ctx.index, @intFromPtr(assembly), @intFromPtr(name) },
+        );
+        return;
+    };
+    std.log.info("  assembly[{}] name='{s}'", .{ ctx.index, std.mem.span(str) });
 }
 
 const Builtin = enum {
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    // temporary builtin, remove this later
+    @"@Void",
+    @"@LogAssemblies",
     @"@LoadAssembly",
     pub fn argCount(builtin: Builtin) u8 {
         return switch (builtin) {
+            .@"@Void" => 0,
+            .@"@LogAssemblies" => 0,
             .@"@LoadAssembly" => 1,
         };
     }
 };
 pub const builtins = std.StaticStringMap(Builtin).initComptime(.{
+    .{ "@Void", .@"@Void" },
+    .{ "@LogAssemblies", .@"@LogAssemblies" },
     .{ "@LoadAssembly", .@"@LoadAssembly" },
 });
 
@@ -1388,6 +1408,91 @@ test "lex" {
         try it.expect(.r_paren, ")");
     }
 }
+
+const ErrorFmt = struct {
+    err: *const Error,
+    text: []const u8,
+    pub fn format(f: *const ErrorFmt, writer: *std.Io.Writer) error{WriteFailed}!void {
+        switch (f.err.*) {
+            .unexpected_token => |e| try writer.print(
+                "{d}: syntax error: expected {s} but got token {t} '{s}'",
+                .{
+                    getLineNum(f.text, e.token.start),
+                    e.expected,
+                    e.token.tag,
+                    f.text[e.token.start..e.token.end],
+                },
+            ),
+            .unknown_builtin => |token| try writer.print(
+                "{d}: unknown builtin '{s}'",
+                .{
+                    getLineNum(f.text, token.start),
+                    f.text[token.start..token.end],
+                },
+            ),
+            .builtin_arg_count => |b| {
+                const builtin_str = f.text[b.builtin_extent.start..b.builtin_extent.end];
+                const builtin = builtins.get(builtin_str).?;
+                const arg_count = builtin.argCount();
+                const arg_suffix: []const u8 = if (arg_count == 1) "" else "s";
+                try writer.print(
+                    "{d}: builtin '{s}' requires {} arg{s} but got {}",
+                    .{
+                        getLineNum(f.text, b.builtin_extent.start),
+                        builtin_str,
+                        arg_count,
+                        arg_suffix,
+                        b.arg_count,
+                    },
+                );
+            },
+            .builtin_arg_type => |b| {
+                const builtin_str = f.text[b.builtin_extent.start..b.builtin_extent.end];
+                try writer.print(
+                    "{d}: builtin '{s}' argument {} type mismatch,  expected '{s}' but got '{s}'",
+                    .{
+                        getLineNum(f.text, b.builtin_extent.start),
+                        builtin_str,
+                        b.arg_index + 1,
+                        @tagName(b.expected),
+                        @tagName(b.actual),
+                    },
+                );
+            },
+            .void_assignment => |v| try writer.print(
+                "{d}: void was assigned to identifier '{s}'",
+                .{
+                    getLineNum(f.text, v.id_extent.start),
+                    f.text[v.id_extent.start..v.id_extent.end],
+                },
+            ),
+            .void_argument => |v| try writer.print(
+                "{d}: void was assigned function argument {}",
+                .{
+                    getLineNum(f.text, v.first_arg_token.start),
+                    v.arg_index + 1,
+                },
+            ),
+            // .load_assembly_string_too_long => |token| try writer.print(
+            //     "{d}: @LoadAssembly string too long ({} bytes but max is {}) {s}",
+            //     .{
+            //         getLineNum(f.text, token.start),
+            //         token.end - token.start - 2,
+            //         max_load_assembly_string,
+            //         f.text[token.start..token.end],
+            //     },
+            // ),
+            .assembly_not_found => |extent| try writer.print(
+                "{d}: @LoadAssembly failed, assembly '{s}' not found",
+                .{
+                    getLineNum(f.text, extent.start),
+                    f.text[extent.start..extent.end],
+                },
+            ),
+            .oom => try writer.writeAll("out of memory"),
+        }
+    }
+};
 
 const std = @import("std");
 const mono = @import("mono.zig");
