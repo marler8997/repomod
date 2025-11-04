@@ -74,9 +74,30 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
     std.log.info("Init Thread running!", .{});
 
-    var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    const mono_dll_name = "mono-2.0-bdwgc.dll";
+    const mono_module = blk: {
+        var attempt: u32 = 0;
+        while (true) {
+            attempt += 1;
+            if (win32.GetModuleHandleW(win32.L(mono_dll_name))) |mono_module|
+                break :blk mono_module;
+            switch (win32.GetLastError()) {
+                .ERROR_MOD_NOT_FOUND => {
+                    std.log.info("{s}: not found yet...", .{mono_dll_name});
+                },
+                else => |e| std.debug.panic("GetModule '{s}' failed, error={f}", .{ mono_dll_name, e }),
+            }
+            const max_attempts = 30;
+            if (attempt >= max_attempts) {
+                std.log.err("unable to load mono dll after {} attempts", .{max_attempts});
+                return 0xffffffff;
+            }
+            std.Thread.sleep(std.time.ns_per_s * 1);
+        }
+    };
+    std.log.info("{s}: 0x{x}", .{ mono_dll_name, @intFromPtr(mono_module) });
 
-    // TODO: do this in a loop
+    var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     while (true) {
         updateMods(scratch.allocator());
         if (!scratch.reset(.retain_capacity)) {

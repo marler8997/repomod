@@ -50,8 +50,15 @@ pub fn main() !void {
 }
 
 fn findGameExecutable(gpa: std.mem.Allocator) ![:0]const u16 {
-    if (true) return gpa.dupeZ(u16, win32.L(
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    const use_helloworld_exe = false;
+    if (use_helloworld_exe) return gpa.dupeZ(u16, win32.L(
         "C:\\git\\zigwin32gen\\.zig-cache\\o\\247ea82740ecc3c00d8fb32f7a7a098d\\helloworld-window.exe",
+    ));
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    const use_simple_window = true;
+    if (use_simple_window) return gpa.dupeZ(u16, win32.L(
+        ".\\testapp\\SimpleWindow.exe",
     ));
     // const stdin = std.io.getStdIn().reader();
 
@@ -90,7 +97,8 @@ fn findGameExecutable(gpa: std.mem.Allocator) ![:0]const u16 {
 
     for (common_paths) |path| {
         std.fs.accessAbsolute(path, .{}) catch continue;
-        return try gpa.dupe(u8, path);
+        // return try gpa.dupeZ(u8, path);
+        return try std.unicode.utf8ToUtf16LeAllocZ(gpa, path);
     }
 
     std.log.err("could not find game executable (todo: maybe make a way to configure this?)", .{});
@@ -176,7 +184,9 @@ fn launchAndInject(
     if (result == 0) win32.panicWin32("CreateProcess", win32.GetLastError());
 
     std.log.info("created game process (pid {})", .{pi.dwProcessId});
-    injectDLL(pi.hProcess.?, dll_path_w) catch |err| {
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    const inject_dll = true;
+    if (inject_dll) injectDLL(pi.hProcess.?, dll_path_w) catch |err| {
         _ = win32.TerminateProcess(pi.hProcess, 1);
         return err;
     };
