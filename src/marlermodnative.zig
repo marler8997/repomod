@@ -147,7 +147,9 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         if (!scratch.reset(.retain_capacity)) {
             std.log.warn("reset scratch allocator failed?", .{});
         }
-        std.Thread.sleep(std.time.ns_per_s * 5);
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        // std.Thread.sleep(std.time.ns_per_s * 5);
+        std.Thread.sleep(std.time.ns_per_s * 1);
     }
 
     // TODO: how do we call .NET methods?
@@ -306,7 +308,7 @@ fn updateMods(
     }
 
     const mod_path = "C:\\temp\\marlermods";
-    std.log.info("loading mods from '{s}'...", .{mod_path});
+    if (false) std.log.info("loading mods from '{s}'...", .{mod_path});
     var dir = std.fs.cwd().openDir(mod_path, .{ .iterate = true }) catch |err| {
         std.log.err("open mod directory '{s}' failed with {s}", .{ mod_path, @errorName(err) });
         return;

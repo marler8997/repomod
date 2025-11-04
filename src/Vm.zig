@@ -12,16 +12,19 @@ stack: std.ArrayListUnmanaged(Value) = .{},
 const Extent = struct { start: usize, end: usize };
 
 const Value = union(enum) {
+    type: ?Type,
     string_literal: Extent,
     assembly: *mono.Assembly,
     pub fn deinit(value: *Value) void {
         switch (value.*) {
+            .type => {},
             .string_literal => {},
             .assembly => {},
         }
     }
     pub fn moveInto(value: *Value, dst: *Value) void {
         switch (value.*) {
+            .type,
             .string_literal,
             .assembly,
             => {
@@ -31,6 +34,7 @@ const Value = union(enum) {
     }
     pub fn getType(value: *const Value) Type {
         return switch (value.*) {
+            .type => .type,
             .string_literal => .string_literal,
             .assembly => .assembly,
         };
@@ -38,14 +42,19 @@ const Value = union(enum) {
 };
 
 const Type = enum {
+    type,
     string_literal,
     assembly,
 };
 
 const max_load_assembly_string = 15;
 
+const TypeContext = enum { @"return", param };
+
 pub const Error = union(enum) {
+    not_implemented: [:0]const u8,
     unexpected_token: struct { expected: [:0]const u8, token: Token },
+    // expr_id_then_unexpected: struct { id_extent: Extent, bad_token: Token },
     unknown_builtin: Token,
     builtin_arg_count: struct { builtin_extent: Extent, arg_count: usize },
     builtin_arg_type: struct {
@@ -53,6 +62,15 @@ pub const Error = union(enum) {
         arg_index: u32,
         expected: Type,
         actual: Type,
+    },
+    needed_type: struct {
+        pos: usize,
+        context: TypeContext,
+        value: enum {
+            @"no value",
+            @"a string",
+            @"an assembly",
+        },
     },
     // an identifier was assigned a void value
     void_assignment: struct {
@@ -75,6 +93,27 @@ pub const Error = union(enum) {
     }
     pub fn fmt(err: *const Error, text: []const u8) ErrorFmt {
         return .{ .err = err, .text = text };
+    }
+
+    pub fn typeFromValue(err: *Error, pos: usize, context: TypeContext, value: *const ?Value) error{Vm}!?Type {
+        if (value.* == null) return err.set(.{ .needed_type = .{
+            .pos = pos,
+            .context = context,
+            .value = .@"no value",
+        } });
+        return switch (value.*.?) {
+            .type => |t| t,
+            .string_literal => err.set(.{ .needed_type = .{
+                .pos = pos,
+                .context = context,
+                .value = .@"a string",
+            } }),
+            .assembly => err.set(.{ .needed_type = .{
+                .pos = pos,
+                .context = context,
+                .value = .@"an assembly",
+            } }),
+        };
     }
 };
 
@@ -114,6 +153,7 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
         const first_token = lex(vm.text, offset);
         offset = first_token.end;
         switch (first_token.tag) {
+            .eof => break,
             .builtin => {
                 var maybe_value, offset = try vm.evalExpr(first_token.start);
                 if (maybe_value) |*value| value.deinit();
@@ -141,9 +181,47 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
                     } }),
                 }
             },
-            .keyword_fn => @panic("todo: implement fn"),
+            .keyword_fn => {
+                const return_type: ?Type, const after_return_type = blk: {
+                    const next_token = lex(vm.text, first_token.end);
+                    if (next_token.isVoid(vm.text)) break :blk .{ null, next_token.end };
+                    const return_type_value, const after_return_type = try vm.evalExpr(first_token.end);
+                    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                    // defer TODO: clean up return_type_value
+                    const return_type = try vm.err.typeFromValue(
+                        first_token.end,
+                        .@"return",
+                        &return_type_value,
+                    );
+                    break :blk .{ return_type, after_return_type };
+                };
+
+                const name_token = lex(vm.text, after_return_type);
+                switch (name_token.tag) {
+                    .identifier => {},
+                    else => return vm.err.set(.{ .unexpected_token = .{
+                        .expected = "a function name identifier",
+                        .token = name_token,
+                    } }),
+                }
+                const after_open_paren = try eatToken(&vm.err, vm.text, name_token.end, .l_paren);
+                offset = after_open_paren;
+                while (true) {
+                    const next = lex(vm.text, offset);
+                    switch (next.tag) {
+                        .r_paren => {
+                            offset = next.end;
+                            break;
+                        },
+                        else => return vm.err.set(.{ .not_implemented = "fn with args" }),
+                    }
+                }
+
+                _ = return_type;
+                return vm.err.set(.{ .not_implemented = "fn body" });
+            },
             else => return vm.err.set(.{ .unexpected_token = .{
-                .expected = "an identifier, builtin or 'fn' keyword",
+                .expected = "an EOF, identifier, builtin or 'fn' keyword",
                 .token = first_token,
             } }),
         }
@@ -152,12 +230,6 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
 
 fn evalExpr(vm: *Vm, start: usize) error{Vm}!struct { ?Value, usize } {
     const first_token = lex(vm.text, start);
-    // offset = first_token.end;
-    // _ = allocator;
-    // _ = vm;
-    // _ = text;
-    // _ = start;
-    // @panic("todo: implement eval");
     switch (first_token.tag) {
         .builtin => {
             const id = vm.text[first_token.start..first_token.end];
@@ -174,10 +246,17 @@ fn evalExpr(vm: *Vm, start: usize) error{Vm}!struct { ?Value, usize } {
                 .l_paren => {
                     std.debug.panic("todo: lookup function '{s}'", .{id});
                 },
-                else => return vm.err.set(.{ .unexpected_token = .{
-                    .expected = "a '(' to start function args",
-                    .token = first_token,
-                } }),
+                else => {
+                    return vm.err.set(.{ .not_implemented = "identifier expressions" });
+                },
+                //     return vm.err.set(.{ .expr_id_then_unexpected = .{
+                //     .id_extent = first_token.extent(),
+                //     .bad_token = second_token,
+                // } }),
+                // else => return vm.err.set(.{ .unexpected_token = .{
+                //     .expected = "a '(' to start function args",
+                //     .token = first_token,
+                // } }),
             }
         },
         .string_literal => return .{ .{ .string_literal = .{
@@ -235,7 +314,7 @@ fn eatToken(
         .l_paren => .l_paren,
     };
     if (token.tag != expected_tag) return out_err.set(.{ .unexpected_token = .{
-        .expected = "a " ++ switch (what) {
+        .expected = switch (what) {
             .l_paren => "an open paren '('",
         },
         .token = token,
@@ -254,7 +333,7 @@ fn evalBuiltin(
         .builtin_arg_count = .{ .builtin_extent = builtin_extent, .arg_count = arg_count },
     });
     switch (builtin) {
-        .@"@Void" => return null,
+        .@"@Nothing" => return null,
         .@"@LogAssemblies" => {
             var context: LogAssemblies = .{ .vm = vm, .index = 0 };
             std.log.info("mono_assembly_foreach:", .{});
@@ -354,19 +433,19 @@ fn logAssemblies(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.
 const Builtin = enum {
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     // temporary builtin, remove this later
-    @"@Void",
+    @"@Nothing",
     @"@LogAssemblies",
     @"@LoadAssembly",
     pub fn argCount(builtin: Builtin) u8 {
         return switch (builtin) {
-            .@"@Void" => 0,
+            .@"@Nothing" => 0,
             .@"@LogAssemblies" => 0,
             .@"@LoadAssembly" => 1,
         };
     }
 };
 pub const builtins = std.StaticStringMap(Builtin).initComptime(.{
-    .{ "@Void", .@"@Void" },
+    .{ "@Nothing", .@"@Nothing" },
     .{ "@LogAssemblies", .@"@LogAssemblies" },
     .{ "@LoadAssembly", .@"@LoadAssembly" },
 });
@@ -378,6 +457,17 @@ const Token = struct {
 
     pub fn extent(t: Token) Extent {
         return .{ .start = t.start, .end = t.end };
+    }
+
+    pub fn fmt(t: Token, text: []const u8) TokenFmt {
+        return .{ .token = t, .text = text };
+    }
+
+    pub fn isVoid(t: Token, text: []const u8) bool {
+        return switch (t.tag) {
+            .identifier => std.mem.eql(u8, text[t.start..t.end], "void"),
+            else => false,
+        };
     }
 
     pub const Tag = enum {
@@ -434,7 +524,7 @@ const Token = struct {
         // asterisk_pipe_equal,
         // arrow,
         // colon,
-        // slash,
+        slash,
         // slash_equal,
         comma,
         // ampersand,
@@ -505,6 +595,31 @@ const Token = struct {
         return keywords.get(bytes);
     }
 };
+const TokenFmt = struct {
+    token: Token,
+    text: []const u8,
+    pub fn format(f: TokenFmt, writer: *std.Io.Writer) error{WriteFailed}!void {
+        switch (f.token.tag) {
+            .invalid => try writer.print("an invalid token '{s}'", .{f.text[f.token.start..f.token.end]}),
+            .identifier => try writer.print("an identifer '{s}'", .{f.text[f.token.start..f.token.end]}),
+            .string_literal => try writer.print("a string literal {s}", .{f.text[f.token.start..f.token.end]}),
+            .eof => try writer.writeAll("EOF"),
+            .builtin => try writer.print("a builtin function '{s}'", .{f.text[f.token.start..f.token.end]}),
+            .equal => try writer.writeAll("an equal '=' character"),
+            .l_paren => try writer.writeAll("an open paren '('"),
+            .r_paren => try writer.writeAll("a close paren ')'"),
+            .l_brace => try writer.writeAll("an open brace '{'"),
+            .r_brace => try writer.writeAll("a close brace '}'"),
+            .l_bracket => try writer.writeAll("an open bracket '['"),
+            .r_bracket => try writer.writeAll("a close bracket ']'"),
+            .period => try writer.writeAll("a period '.'"),
+            .slash => try writer.writeAll("a slash '/'"),
+            .comma => try writer.writeAll("a comma ','"),
+            .keyword_fn => try writer.writeAll("the 'fn' keyword"),
+        }
+    }
+};
+
 fn lex(text: []const u8, lex_start: usize) Token {
     const State = union(enum) {
         start,
@@ -512,6 +627,8 @@ fn lex(text: []const u8, lex_start: usize) Token {
         saw_at_sign: usize,
         builtin: usize,
         string_literal: usize,
+        slash: usize,
+        line_comment,
     };
 
     var index = lex_start;
@@ -519,10 +636,15 @@ fn lex(text: []const u8, lex_start: usize) Token {
 
     while (true) {
         if (index >= text.len) return switch (state) {
-            .start => .{ .tag = .eof, .start = index, .end = index },
-            .identifier => |start| .{ .tag = .identifier, .start = start, .end = index },
+            .start, .line_comment => .{ .tag = .eof, .start = index, .end = index },
+            .identifier => |start| .{
+                .tag = Token.getKeyword(text[start..index]) orelse .identifier,
+                .start = start,
+                .end = index,
+            },
             .builtin => |start| .{ .tag = .builtin, .start = start, .end = index },
             .saw_at_sign, .string_literal => |start| .{ .tag = .invalid, .start = start, .end = index },
+            .slash => |start| .{ .tag = .slash, .start = start, .end = index },
         };
         switch (state) {
             .start => {
@@ -579,7 +701,10 @@ fn lex(text: []const u8, lex_start: usize) Token {
                     // },
                     '.' => return .{ .tag = .period, .start = index, .end = index + 1 },
                     // '-' => continue :state .minus,
-                    // '/' => continue :state .slash,
+                    '/' => {
+                        state = .{ .slash = index };
+                        index += 1;
+                    },
                     // '&' => continue :state .ampersand,
                     // '0'...'9' => {
                     //     result.tag = .number_literal;
@@ -616,18 +741,30 @@ fn lex(text: []const u8, lex_start: usize) Token {
                 'a'...'z', 'A'...'Z', '_', '0'...'9' => index += 1,
                 else => return .{ .tag = .builtin, .start = start, .end = index },
             },
-            .string_literal => |start| {
-                switch (text[index]) {
-                    '"' => return .{ .tag = .string_literal, .start = start, .end = index + 1 },
-                    '\n' => return .{ .tag = .invalid, .start = start, .end = index },
-                    else => index += 1,
-                    // '\\' => continue :state .string_literal_backslash,
-                    // '"' => self.index += 1,
-                    // 0x01...0x09, 0x0b...0x1f, 0x7f => {
-                    //     continue :state .invalid;
-                    // },
-                    // else => continue :state .string_literal,
-                }
+            .string_literal => |start| switch (text[index]) {
+                '"' => return .{ .tag = .string_literal, .start = start, .end = index + 1 },
+                '\n' => return .{ .tag = .invalid, .start = start, .end = index },
+                else => index += 1,
+                // '\\' => continue :state .string_literal_backslash,
+                // '"' => self.index += 1,
+                // 0x01...0x09, 0x0b...0x1f, 0x7f => {
+                //     continue :state .invalid;
+                // },
+                // else => continue :state .string_literal,
+            },
+            .slash => |start| switch (text[index]) {
+                '/' => {
+                    state = .line_comment;
+                    index += 1;
+                },
+                else => return .{ .tag = .slash, .start = start, .end = index },
+            },
+            .line_comment => switch (text[index]) {
+                '\n' => {
+                    state = .start;
+                    index += 1;
+                },
+                else => index += 1,
             },
         }
     }
@@ -1414,15 +1551,23 @@ const ErrorFmt = struct {
     text: []const u8,
     pub fn format(f: *const ErrorFmt, writer: *std.Io.Writer) error{WriteFailed}!void {
         switch (f.err.*) {
+            .not_implemented => |n| try writer.print("{s} not implemented", .{n}),
             .unexpected_token => |e| try writer.print(
-                "{d}: syntax error: expected {s} but got token {t} '{s}'",
+                "{d}: syntax error: expected {s} but got {f}",
                 .{
                     getLineNum(f.text, e.token.start),
                     e.expected,
-                    e.token.tag,
-                    f.text[e.token.start..e.token.end],
+                    e.token.fmt(f.text),
                 },
             ),
+            // .expr_id_then_unexpected => |e| try writer.print(
+            //     "{d}: syntax error: expected an expression but got id '{s}' followed by {f}",
+            //     .{
+            //         getLineNum(f.text, e.bad_token.start),
+            //         f.text[e.id_extent.start..e.id_extent.end],
+            //         e.bad_token.fmt(f.text),
+            //     },
+            // ),
             .unknown_builtin => |token| try writer.print(
                 "{d}: unknown builtin '{s}'",
                 .{
@@ -1459,15 +1604,23 @@ const ErrorFmt = struct {
                     },
                 );
             },
+            .needed_type => |n| try writer.print(
+                "{d}: expected a {s} type but got {s}",
+                .{
+                    getLineNum(f.text, lex(f.text, n.pos).start),
+                    @tagName(n.context),
+                    @tagName(n.value),
+                },
+            ),
             .void_assignment => |v| try writer.print(
-                "{d}: void was assigned to identifier '{s}'",
+                "{d}: nothing was assigned to identifier '{s}'",
                 .{
                     getLineNum(f.text, v.id_extent.start),
                     f.text[v.id_extent.start..v.id_extent.end],
                 },
             ),
             .void_argument => |v| try writer.print(
-                "{d}: void was assigned function argument {}",
+                "{d}: nothing was assigned function argument {}",
                 .{
                     getLineNum(f.text, v.first_arg_token.start),
                     v.arg_index + 1,
@@ -1493,6 +1646,39 @@ const ErrorFmt = struct {
         }
     }
 };
+
+fn testBadCode(text: []const u8, expected_error: []const u8) !void {
+    // std.debug.print("testing bad code:\n---\n{s}\n---\n", .{text});
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    var vm: Vm = .{
+        .mono_funcs = undefined,
+        .mono_domain = undefined,
+        .allocator = gpa.allocator(),
+        .err = undefined,
+        .text = text,
+    };
+    if (vm.interpret()) {
+        return error.TestUnexpectedSuccess;
+    } else |_| {
+        var buf: [1000]u8 = undefined;
+        const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{vm.err.fmt(text)});
+        if (!std.mem.eql(u8, expected_error, actual_error)) {
+            std.log.err("actual error string\n\"{f}\"\n", .{std.zig.fmtString(actual_error)});
+            return error.TestUnexpectedError;
+        }
+    }
+}
+test "bad code" {
+    try testBadCode("example_id = @Nothing()", "1: nothing was assigned to identifier 'example_id'");
+    try testBadCode("fn", "1: syntax error: expected an expression but got EOF");
+    // try testBadCode("fn a", "1: syntax error: expected an expression but got id 'a' followed by EOF");
+    try testBadCode("fn @Nothing()", "1: expected a return type but got no value");
+    try testBadCode("fn void", "1: syntax error: expected a function name identifier but got EOF");
+    try testBadCode("fn void \"hello\"", "1: syntax error: expected a function name identifier but got a string literal \"hello\"");
+    try testBadCode("fn void foo )", "1: syntax error: expected an open paren '(' but got a close paren ')'");
+    // try testBadCode("fn @LoadAssembly("b")
+}
 
 const std = @import("std");
 const mono = @import("mono.zig");
