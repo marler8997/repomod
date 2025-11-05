@@ -17,7 +17,7 @@ pub const Funcs = struct {
     assembly_get_image: *const fn (*Assembly) callconv(.c) ?*Image,
     assembly_name_get_name: *const fn (*AssemblyName) callconv(.c) ?[*:0]const u8,
 
-    class_from_name: *const fn (*Image, namespace: [*:0]const u8, name: [*:0]const u8) ?*Class,
+    class_from_name: *const fn (*Image, namespace: [*:0]const u8, name: [*:0]const u8) callconv(.c) ?*Class,
     pub fn init(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!Funcs {
         return .{
             .get_root_domain = try monoload.get(mod, .get_root_domain, proc_ref),

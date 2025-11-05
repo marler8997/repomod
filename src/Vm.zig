@@ -30,6 +30,7 @@ const Type = enum {
     string_literal,
     function,
     assembly,
+    class,
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     // TODO: replace this with class_field?
     // assembly_field,
@@ -39,6 +40,7 @@ const Type = enum {
             .string_literal => "a string literal",
             .function => "a function",
             .assembly => "an assembly",
+            .class => "a class",
             // .assembly_field => "an assembly field",
         };
     }
@@ -100,6 +102,11 @@ pub const Error = union(enum) {
     assembly_not_found: Extent,
     namespace_too_big: Token,
     class_name_too_big: Token,
+    missing_class: struct {
+        assembly: *mono.Assembly,
+        namespace: Extent,
+        name: Extent,
+    },
     oom,
     pub fn set(err: *Error, value: Error) error{Vm} {
         err.* = value;
@@ -303,6 +310,9 @@ fn evalExprSuffix(
                     .field = id_extent,
                     .unexpected_type = expr_type,
                 } }),
+                .class => {
+                    return vm.err.set(.{ .not_implemented = "class fields" });
+                },
                 // .assembly => {
                 //     const field_string = vm.text[id_extent.start..id_extent.end];
                 //     if (std.mem.eql(u8, field_string, "Class")) {
@@ -415,9 +425,10 @@ fn pushValueFromAddr(vm: *Vm, src_addr: Memory.Addr) error{Vm}!void {
             const assembly = vm.mem.toPointer(*mono.Assembly, value_addr);
             (try vm.push(*mono.Assembly)).* = assembly.*;
         },
-        // .assembly_field => {
-        //     @panic("todo");
-        // },
+        .class => {
+            const class = vm.mem.toPointer(*mono.Class, value_addr);
+            (try vm.push(*mono.Class)).* = class.*;
+        },
     }
 }
 
@@ -632,14 +643,17 @@ fn evalBuiltin(
             const namespace: [:0]const u8 = namespace_buf[0..namespace_slice.len :0];
             const name: [:0]const u8 = name_buf[0..name_slice.len :0];
 
-            const class = vm.mono_funcs.class_from_name(image, namespace, name);
-            std.debug.print("class is {*}\n", .{class});
-            return vm.err.set(.{ .not_implemented = "@Class" });
-            // const match = context.match orelse return vm.err.set(
-            //     .{ .assembly_not_found = token.extent() },
-            // );
-            // (try vm.push(Type)).* = .assembly;
-            // (try vm.push(*mono.Assembly)).* = match;
+            const class = vm.mono_funcs.class_from_name(
+                image,
+                namespace,
+                name,
+            ) orelse return vm.err.set(.{ .missing_class = .{
+                .assembly = assembly,
+                .namespace = namespace_token.extent(),
+                .name = name_token.extent(),
+            } });
+            (try vm.push(Type)).* = .class;
+            (try vm.push(*mono.Class)).* = class;
         },
     }
 }
@@ -2089,6 +2103,14 @@ const ErrorFmt = struct {
                     dotnet_max_id,
                 },
             ),
+            .missing_class => |m| try writer.print(
+                "{d}: this assembly does not have a class with namespace {s} and name {s}",
+                .{
+                    getLineNum(f.text, m.namespace.start),
+                    f.text[m.namespace.start..m.namespace.end],
+                    f.text[m.name.start..m.name.end],
+                },
+            ),
             .oom => try writer.writeAll("out of memory"),
         }
     }
@@ -2119,14 +2141,15 @@ const TestImage = struct {
 const TestAssemblyName = struct {
     cstr: [:0]const u8,
 };
-var test_assemblies = [_]TestAssembly{
-    .{ .name = .{ .cstr = "mscorlib" } },
-    .{ .name = .{ .cstr = "ExampleAssembly" } },
+var mscorlib: TestAssembly = .{ .name = .{ .cstr = "mscorlib" } };
+var example_assembly: TestAssembly = .{ .name = .{ .cstr = "ExampleAssembly" } };
+const ConsoleClass = struct {
+    placeholder: i32 = 0,
 };
+var console_class: ConsoleClass = .{};
 fn test_assembly_foreach(func: *const mono.Callback, user_data: ?*anyopaque) callconv(.c) void {
-    for (&test_assemblies) |*assembly| {
-        func(assembly, user_data);
-    }
+    func(&mscorlib, user_data);
+    func(&example_assembly, user_data);
 }
 fn test_assembly_get_name(assembly: *mono.Assembly) callconv(.c) ?*mono.AssemblyName {
     return @ptrCast(&@as(*TestAssembly, @ptrCast(@alignCast(assembly))).name);
@@ -2137,11 +2160,20 @@ fn test_assembly_get_image(assembly: *mono.Assembly) callconv(.c) ?*mono.Image {
 fn test_assembly_name_get_name(name: *mono.AssemblyName) callconv(.c) ?[*:0]const u8 {
     return @as(*TestAssemblyName, @ptrCast(@alignCast(name))).cstr.ptr;
 }
-fn test_class_from_name(image: *mono.Image, namespace: [*:0]const u8, name: [*:0]const u8) ?*mono.Class {
-    _ = image;
-    _ = namespace;
-    _ = name;
-    @panic("todo");
+fn test_class_from_name(
+    image_opaque: *mono.Image,
+    namespace_ptr: [*:0]const u8,
+    name_ptr: [*:0]const u8,
+) callconv(.c) ?*mono.Class {
+    const image: *TestImage = @ptrCast(@alignCast(image_opaque));
+    const namespace = std.mem.span(namespace_ptr);
+    const name = std.mem.span(name_ptr);
+    if (image == &mscorlib.image) {
+        if (std.mem.eql(u8, namespace, "System")) {
+            if (std.mem.eql(u8, name, "Console")) return @ptrCast(&console_class);
+        }
+    }
+    return null;
 }
 
 fn testBadCode(text: []const u8, expected_error: []const u8) !void {
@@ -2189,6 +2221,10 @@ test "bad code" {
     try testBadCode(
         "@Class(@Assembly(\"mscorlib\"), \"System\", \"" ++ ("a" ** (dotnet_max_id + 1)) ++ "\")",
         "1: class name \"" ++ ("a" ** (dotnet_max_id + 1)) ++ "\" is too big (1024 bytes but max is 1023)",
+    );
+    try testBadCode(
+        "@Class(@Assembly(\"mscorlib\"), \"DoesNot\", \"Exist\")",
+        "1: this assembly does not have a class with namespace \"DoesNot\" and name \"Exist\"",
     );
     // const max_fields = 256;
     // try testCode("@Assembly(\"mscorlib\")" ++ (".a" ** max_fields));

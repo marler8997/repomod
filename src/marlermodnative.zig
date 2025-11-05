@@ -371,7 +371,7 @@ fn updateMods(
                     .symbols = .{},
                 };
                 defer vm.deinit();
-                vm.interpret() catch {
+                vm.evalRoot() catch {
                     std.log.err("{s}:{f}", .{ mod.name(), vm.err.fmt(state.text) });
                 };
                 state.processed = true;
