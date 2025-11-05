@@ -2,18 +2,17 @@ const Memory = @This();
 
 allocator: Allocator,
 chunks: std.DoublyLinkedList = .{},
-// end: usize = 0,
 
-pub fn deinit(self: *Memory) void {
-    var it = self.chunks.last;
+pub fn deinit(mem: *Memory) void {
+    var it = mem.chunks.last;
     while (it) |node| {
         // save this before freeing the chunk
         const prev = node.prev;
         const chunk: *Chunk = @fieldParentPtr("list_node", node);
-        self.allocator.free(chunk.getAllocation());
+        mem.allocator.free(chunk.getAllocation());
         it = prev;
     }
-    self.* = undefined;
+    mem.* = undefined;
 }
 
 const chunk_metadata_size = std.mem.alignForward(usize, @sizeOf(Chunk), alignment);
@@ -23,28 +22,152 @@ const Chunk = struct {
     alloc_size: usize,
     total_used: usize,
     pub fn getAllocation(chunk: *Chunk) []align(alignment) u8 {
-        // return @as([*]u8, @ptrCast(chunk))[0 .. @sizeOf(Chunk) + chunk.data_capacity];
         return @as([*]align(alignment) u8, @ptrCast(chunk))[0..chunk.alloc_size];
     }
-    // pub fn getData(chunk: *Chunk) []align(alignment) u8 {
-    //     // return @as([*]u8, @ptrCast(chunk))[@sizeOf(Chunk)..][0..chunk.data_capacity];
-    //     return @as([*]align(alignment) u8, @ptrCast(chunk))[chunk_metadata_size..chunk.alloc_size];
-    // }
 };
 
 pub const Addr = struct {
     node: ?*std.DoublyLinkedList.Node,
     offset: usize,
-    pub fn eql(self: Addr, other: Addr) bool {
-        return (self.node == other.node) and (self.offset == other.offset);
+    pub fn format(addr: Addr, writer: *std.Io.Writer) error{WriteFailed}!void {
+        if (addr.node) |node| {
+            std.debug.assert(addr.offset >= chunk_metadata_size);
+            try writer.print("0x{x}({})", .{ @intFromPtr(node), addr.offset });
+        } else {
+            std.debug.assert(addr.offset == 0);
+            try writer.print("0", .{});
+        }
+    }
+    pub fn eql(addr1: Addr, addr2: Addr) bool {
+        const addr1_node = addr1.node orelse {
+            std.debug.assert(addr1.offset == 0);
+            if (addr2.node == null) {
+                std.debug.assert(addr2.offset == 0);
+                return true;
+            }
+            std.debug.assert(addr2.offset >= chunk_metadata_size);
+            return addr2.offset == chunk_metadata_size;
+        };
+
+        std.debug.assert(addr1.offset >= chunk_metadata_size);
+        const addr2_node = addr2.node orelse {
+            std.debug.assert(addr2.offset == 0);
+            return addr1.offset == chunk_metadata_size and addr1_node.prev == null;
+        };
+
+        std.debug.assert(addr2.offset >= chunk_metadata_size);
+
+        if (addr1_node == addr2_node) return addr1.offset == addr2.offset;
+
+        const chunk1: *const Chunk = @fieldParentPtr("list_node", addr1_node);
+        if (addr1.offset == chunk1.total_used and addr1_node.next == addr2_node and addr2.offset == chunk_metadata_size) {
+            return true;
+        }
+        const chunk2: *const Chunk = @fieldParentPtr("list_node", addr2_node);
+        if (addr2.offset == chunk2.total_used and addr2_node.next == addr1_node and addr1.offset == chunk_metadata_size) {
+            return true;
+        }
+
+        return false;
     }
 };
+
 pub fn top(mem: *Memory) Addr {
     if (mem.chunks.last) |last_node| {
         const chunk: *Chunk = @fieldParentPtr("list_node", last_node);
         return .{ .node = last_node, .offset = chunk.total_used };
     }
     return .{ .node = null, .offset = 0 };
+}
+pub fn discardFrom(mem: *Memory, addr: Addr) usize {
+    var total_discarded: usize = 0;
+    const addr_node = addr.node orelse {
+        // free everything!
+        std.debug.assert(addr.offset == 0);
+        var it = mem.chunks.last;
+        while (it) |node| {
+            // save this before freeing the chunk
+            const prev = node.prev;
+            const chunk: *Chunk = @fieldParentPtr("list_node", node);
+            std.debug.assert(chunk.total_used >= chunk_metadata_size);
+            total_discarded += chunk.total_used - chunk_metadata_size;
+            mem.allocator.free(chunk.getAllocation());
+            it = prev;
+        }
+        mem.chunks = .{};
+        return total_discarded;
+    };
+    std.debug.assert(addr.offset >= chunk_metadata_size);
+
+    var it = mem.chunks.last.?;
+    while (true) {
+        const chunk: *Chunk = @fieldParentPtr("list_node", it);
+        std.debug.assert(chunk.total_used >= chunk_metadata_size);
+
+        if (addr_node == it) {
+            std.debug.assert(addr.offset <= chunk.total_used);
+            total_discarded += chunk.total_used - addr.offset;
+            chunk.total_used = addr.offset;
+            return total_discarded;
+        }
+
+        // save this before freeing the chunk
+        const prev = it.prev.?;
+        total_discarded += chunk.total_used - chunk_metadata_size;
+        mem.allocator.free(chunk.getAllocation());
+        it = prev;
+    }
+}
+
+pub fn toPointer(mem: *Memory, comptime T: type, addr: Addr) *T {
+    comptime std.debug.assert(@alignOf(T) <= alignment);
+    const aligned_sizeof_t = std.mem.alignForward(usize, @sizeOf(T), alignment);
+
+    const node = addr.node orelse {
+        std.debug.assert(addr.offset == 0);
+        const chunk: *Chunk = @fieldParentPtr("list_node", mem.chunks.first.?);
+        const allocation = chunk.getAllocation();
+        std.debug.assert(chunk_metadata_size + aligned_sizeof_t <= chunk.total_used);
+        return @ptrCast(@alignCast(&allocation[chunk_metadata_size]));
+    };
+
+    std.debug.assert(addr.offset >= chunk_metadata_size);
+    const chunk: *Chunk = @fieldParentPtr("list_node", node);
+
+    if (addr.offset < chunk.total_used) {
+        std.debug.assert(addr.offset + aligned_sizeof_t <= chunk.total_used);
+        const allocation = chunk.getAllocation();
+        return @ptrCast(@alignCast(&allocation[addr.offset]));
+    }
+
+    std.debug.assert(addr.offset == chunk.total_used);
+    const next_chunk: *Chunk = @fieldParentPtr("list_node", node.next.?);
+    const allocation = next_chunk.getAllocation();
+    std.debug.assert(chunk_metadata_size + aligned_sizeof_t <= next_chunk.total_used);
+    return @ptrCast(@alignCast(&allocation[chunk_metadata_size]));
+}
+
+pub fn after(mem: *Memory, comptime T: type, addr: Addr) Addr {
+    comptime std.debug.assert(@alignOf(T) <= alignment);
+    const aligned_sizeof_t = std.mem.alignForward(usize, @sizeOf(T), alignment);
+
+    const node = addr.node orelse {
+        std.debug.assert(addr.offset == 0);
+        const chunk: *Chunk = @fieldParentPtr("list_node", mem.chunks.first.?);
+        std.debug.assert(chunk_metadata_size + aligned_sizeof_t <= chunk.total_used);
+        return .{
+            .node = &chunk.list_node,
+            .offset = chunk_metadata_size + aligned_sizeof_t,
+        };
+    };
+
+    std.debug.assert(addr.offset >= chunk_metadata_size);
+    const chunk: *Chunk = @fieldParentPtr("list_node", node);
+    std.debug.assert(addr.offset + aligned_sizeof_t <= chunk.total_used);
+    return .{
+        .node = &chunk.list_node,
+        .offset = addr.offset + aligned_sizeof_t,
+    };
 }
 
 const alignment = 8;
@@ -106,7 +229,6 @@ fn allocateChunk(mem: *Memory, min_capacity: usize) error{OutOfMemory}!void {
 }
 
 test "Memory basic allocation" {
-    const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -127,7 +249,6 @@ test "Memory basic allocation" {
 }
 
 test "Memory multiple chunks" {
-    const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -149,7 +270,6 @@ test "Memory multiple chunks" {
 }
 
 test "Memory alignment" {
-    const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -174,5 +294,80 @@ test "Memory alignment" {
     try testing.expectEqual(@as(u16, 3), ptr3.*);
 }
 
+test "Memory toPointer all cases" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var mem = Memory{ .allocator = allocator };
+    defer mem.deinit();
+
+    const zero_addr = Addr{ .node = null, .offset = 0 };
+    try testing.expectEqual(zero_addr, mem.top());
+
+    // Case 1: null node with offset 0 - should point to first item in first chunk
+    const ptr1 = try mem.push(u32);
+    ptr1.* = 42;
+
+    try testing.expectEqual(Addr{
+        .node = mem.chunks.first,
+        .offset = chunk_metadata_size + std.mem.alignForward(usize, @sizeOf(u32), alignment),
+    }, mem.top());
+
+    const null_ptr = mem.toPointer(u32, zero_addr);
+    try testing.expectEqual(@as(u32, 42), null_ptr.*);
+    try testing.expectEqual(ptr1, null_ptr);
+    try testing.expectEqual(Addr{
+        .node = mem.chunks.first,
+        .offset = chunk_metadata_size + std.mem.alignForward(usize, @sizeOf(u32), alignment),
+    }, mem.after(u32, zero_addr));
+
+    // Case 2: normal address within a chunk
+    const ptr2 = try mem.push(u64);
+    ptr2.* = 12345;
+
+    const normal_addr = Addr{
+        .node = mem.chunks.first,
+        .offset = chunk_metadata_size + std.mem.alignForward(usize, @sizeOf(u32), alignment),
+    };
+    const normal_ptr = mem.toPointer(u64, normal_addr);
+    try testing.expectEqual(@as(u64, 12345), normal_ptr.*);
+    try testing.expectEqual(ptr2, normal_ptr);
+    try testing.expectEqual(Addr{
+        .node = mem.chunks.first,
+        .offset = chunk_metadata_size +
+            std.mem.alignForward(usize, @sizeOf(u32), alignment) +
+            std.mem.alignForward(usize, @sizeOf(u64), alignment),
+    }, mem.after(u32, normal_addr));
+
+    // Case 3: address at end of chunk - should point to first item in next chunk
+    // Fill up the first chunk
+    const last_chunk = mem.chunks.last;
+    while (mem.chunks.last == last_chunk) {
+        const value_ptr = try mem.push([alignment]u8);
+        value_ptr.* = undefined;
+    }
+
+    const test_value: u32 = 0xa819a0b2;
+
+    {
+        const value_ptr = mem.toPointer(u32, .{
+            .node = mem.chunks.last,
+            .offset = chunk_metadata_size,
+        });
+        value_ptr.* = test_value;
+    }
+
+    const first_chunk: *Chunk = @fieldParentPtr("list_node", mem.chunks.first.?);
+    const boundary_addr = Addr{
+        .node = mem.chunks.first,
+        .offset = first_chunk.total_used,
+    };
+
+    const boundary_ptr = mem.toPointer(u32, boundary_addr);
+    try testing.expectEqual(test_value, boundary_ptr.*);
+}
+
 const std = @import("std");
+const testing = std.testing;
 const Allocator = std.mem.Allocator;

@@ -1,0 +1,45 @@
+Root <- Statement*
+Statement
+   <- IfStatement
+    / fn IDENTIFIER FnCallArguments Block
+    / IDENTIFIER EQUAL Expr
+    / Expr (EQUAL Expr)?
+Expr  <- Expr2 (KEYWORD_or Expr2)*
+Expr2 <- Expr3 (KEYWORD_and Expr3)*
+...
+PrimaryExpr
+  <- IfExpr
+   / KEYWORD_break Expr
+   / KEYWORD_continue Expr
+   / KEYWORD_return Expr
+   / Block
+   / PrimaryTypeExpr ExprSuffix
+
+ExprSuffix <- (SuffixOp / FnCallArguments)*
+
+PrimaryTypeExpr
+    <- BUILTINIDENTIFIER FnCallArguments
+     / CHAR_LITERAL
+     ??? / ContainerDecl
+     / DOT IDENTIFIER
+     ??? / DOT InitList
+     ??? / ErrorSetDecl
+     / FLOAT
+     ??? / FnProto
+     ??? / GroupedExpr
+     ??? / LabeledTypeExpr
+     / IDENTIFIER
+     / IfTypeExpr
+     / INTEGER
+     / KEYWORD_unreachable
+     / STRINGLITERAL
+
+Block <- LBRACE Statement* RBRACE
+//
+SuffixOp
+   <- LBRACKET Expr RBRACKET
+    / DOT IDENTIFIER
+//
+IfExpr <- IfPrefix Expr ("else" Payload? Expr)?
+IfPrefix <- "if" "(" Expr ")" PtrPayload?
+FnCallArgs <- "(" (Expr ",")* Expr? ")"
