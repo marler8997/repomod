@@ -55,6 +55,7 @@ pub const Error = union(enum) {
     not_implemented: [:0]const u8,
     unexpected_token: struct { expected: [:0]const u8, token: Token },
     unknown_builtin: Token,
+    undefined_identifier: Token,
     builtin_arg_count: struct { builtin_extent: Extent, arg_count: usize },
     builtin_arg_type: struct {
         builtin_extent: Extent,
@@ -94,13 +95,16 @@ pub const Error = union(enum) {
         return .{ .err = err, .text = text };
     }
 
-    pub fn typeFromValue(err: *Error, pos: usize, context: TypeContext, value: *const ?Value) error{Vm}!?Type {
+    pub fn returnTypeFromValue(err: *Error, pos: usize, value: *const ?Value) error{Vm}!?Type {
         if (value.* == null) return err.set(.{ .needed_type = .{
             .pos = pos,
-            .context = context,
+            .context = .@"return",
             .value = .@"no value",
         } });
-        return switch (value.*.?) {
+        return err.typeFromValue(pos, .@"return", &value.*.?);
+    }
+    pub fn typeFromValue(err: *Error, pos: usize, context: TypeContext, value: *const Value) error{Vm}!?Type {
+        return switch (value.*) {
             .type => |t| t,
             .string_literal => err.set(.{ .needed_type = .{
                 .pos = pos,
@@ -173,7 +177,14 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
                         }
                         maybe_value.?.moveInto(entry.value_ptr);
                     },
-                    .l_paren => return vm.err.set(.{ .not_implemented = "function calls" }),
+                    .l_paren => {
+                        const name = vm.text[first_token.start..first_token.end];
+                        const value = vm.symbol_table.get(name) orelse return vm.err.set(
+                            .{ .undefined_identifier = first_token },
+                        );
+                        _ = value;
+                        return vm.err.set(.{ .not_implemented = "function calls" });
+                    },
                     else => return vm.err.set(.{ .unexpected_token = .{
                         .expected = "an '=' or '(' after identifier",
                         .token = second_token,
@@ -187,12 +198,10 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
                     const return_type_value, const after_return_type = try vm.evalExpr(first_token.end);
                     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                     // defer TODO: clean up return_type_value
-                    const return_type = try vm.err.typeFromValue(
+                    break :blk .{ try vm.err.returnTypeFromValue(
                         first_token.end,
-                        .@"return",
                         &return_type_value,
-                    );
-                    break :blk .{ return_type, after_return_type };
+                    ), after_return_type };
                 };
                 _ = return_type;
 
@@ -204,6 +213,13 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
                         .token = name_token,
                     } }),
                 }
+
+                // const name = vm.text[name_token.start..name_token.end];
+                // if (vm.symbol_table.getEntry(name)) |entry| {
+                //     _ = entry;
+                //     @panic("todo");
+                // }
+
                 const after_open_paren = try eat(vm.text, &vm.err).token(name_token.end, .l_paren);
                 offset = after_open_paren;
                 while (true) {
@@ -216,6 +232,11 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
                         else => return vm.err.set(.{ .not_implemented = "fn with args" }),
                     }
                 }
+
+                // const entry = vm.symbol_table.getOrPut(
+                // {}
+
+                // const body_start = offset;
                 offset = try eat(vm.text, &vm.err).token(offset, .l_brace);
                 offset = try eat(vm.text, &vm.err).body(offset);
             },
@@ -244,6 +265,7 @@ fn evalExpr(vm: *Vm, start: usize) error{Vm}!struct { ?Value, usize } {
             switch (second_token.tag) {
                 .l_paren => {
                     std.debug.panic("todo: lookup function '{s}'", .{id});
+                    // return vm.err.set(.{ .not_implemented = "todo: ll" });
                 },
                 else => {
                     return vm.err.set(.{ .not_implemented = "identifier expressions" });
@@ -553,6 +575,9 @@ pub const builtins = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@LogAssemblies", .@"@LogAssemblies" },
     .{ "@LoadAssembly", .@"@LoadAssembly" },
 });
+// pub const builtin_identifiers = std.StaticStringMap(Value).initComptime(.{
+//     .{ "void", .{ .type =  },
+// });
 
 const Token = struct {
     tag: Tag,
@@ -1671,6 +1696,13 @@ const ErrorFmt = struct {
                     f.text[token.start..token.end],
                 },
             ),
+            .undefined_identifier => |token| try writer.print(
+                "{d}: undefined identifier '{s}'",
+                .{
+                    getLineNum(f.text, token.start),
+                    f.text[token.start..token.end],
+                },
+            ),
             .builtin_arg_count => |b| {
                 const builtin_str = f.text[b.builtin_extent.start..b.builtin_extent.end];
                 const builtin = builtins.get(builtin_str).?;
@@ -1773,7 +1805,8 @@ test "bad code" {
     try testBadCode("fn void", "1: syntax error: expected a function name identifier but got EOF");
     try testBadCode("fn void \"hello\"", "1: syntax error: expected a function name identifier but got a string literal \"hello\"");
     try testBadCode("fn void foo )", "1: syntax error: expected an open paren '(' but got a close paren ')'");
-    // try testBadCode("fn @LoadAssembly("b")
+    try testBadCode("foo()", "1: undefined identifier 'foo'");
+    // try testBadCode("fn void foo(){} fn void foo(){}", "");
 }
 
 const std = @import("std");
