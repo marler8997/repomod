@@ -2,12 +2,20 @@ const Vm = @This();
 
 mono_funcs: *const mono.Funcs,
 mono_domain: *mono.Domain,
-allocator: std.mem.Allocator,
+// allocator: std.mem.Allocator,
 err: Error,
 text: []const u8,
 
-symbol_table: std.StringHashMapUnmanaged(Value) = .{},
-stack: std.ArrayListUnmanaged(Value) = .{},
+// symbol_table: std.StringHashMapUnmanaged(Value) = .{},
+// stack: std.ArrayListUnmanaged(Value) = .{},
+mem: Memory,
+symbols: std.DoublyLinkedList,
+
+const Symbol = struct {
+    list_node: std.DoublyLinkedList.Node,
+    extent: Extent,
+    addr: usize,
+};
 
 const Extent = struct { start: usize, end: usize };
 
@@ -138,8 +146,9 @@ fn getLineNum(text: []const u8, offset: usize) u32 {
 //     }
 // };
 
-pub fn deinit(vm: *Vm, allocator: std.mem.Allocator) void {
-    vm.symbol_table.deinit(allocator);
+pub fn deinit(vm: *Vm) void {
+    vm.mem.deinit();
+    // vm.symbol_table.deinit(allocator);
     vm.* = undefined;
 }
 
@@ -158,32 +167,37 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
         switch (first_token.tag) {
             .eof => break,
             .builtin => {
-                var maybe_value, offset = try vm.evalExpr(first_token.start);
-                if (maybe_value) |*value| value.deinit();
+                @panic("todo");
+                // var maybe_value, offset = try vm.evalExpr(first_token.start);
+                // if (maybe_value) |*value| value.deinit();
             },
             .identifier => {
-                const id = vm.text[first_token.start..first_token.end];
+                // const id = vm.text[first_token.start..first_token.end];
                 const second_token = lex(vm.text, offset);
                 offset = second_token.end;
                 switch (second_token.tag) {
                     .equal => {
-                        var maybe_value, offset = try vm.evalExpr(second_token.end);
-                        if (maybe_value == null) return vm.err.set(.{ .void_assignment = .{
+                        const symbol: *Symbol = vm.mem.push(Symbol) catch return vm.err.set(.oom);
+                        const value_addr = vm.mem.end;
+                        offset = try vm.evalExpr(second_token.end);
+                        if (value_addr == vm.mem.end) return vm.err.set(.{ .void_assignment = .{
                             .id_extent = first_token.extent(),
                         } });
-                        const entry = vm.symbol_table.getOrPut(vm.allocator, id) catch |e| return vm.err.setOom(e);
-                        if (entry.found_existing) {
-                            entry.value_ptr.deinit();
-                        }
-                        maybe_value.?.moveInto(entry.value_ptr);
+                        symbol.* = .{
+                            .list_node = .{},
+                            .extent = first_token.extent(),
+                            .addr = value_addr,
+                        };
+                        vm.symbols.append(&symbol.list_node);
                     },
                     .l_paren => {
-                        const name = vm.text[first_token.start..first_token.end];
-                        const value = vm.symbol_table.get(name) orelse return vm.err.set(
-                            .{ .undefined_identifier = first_token },
-                        );
-                        _ = value;
-                        return vm.err.set(.{ .not_implemented = "function calls" });
+                        @panic("todo");
+                        // const name = vm.text[first_token.start..first_token.end];
+                        // const value = vm.symbol_table.get(name) orelse return vm.err.set(
+                        //     .{ .undefined_identifier = first_token },
+                        // );
+                        // _ = value;
+                        // return vm.err.set(.{ .not_implemented = "function calls" });
                     },
                     else => return vm.err.set(.{ .unexpected_token = .{
                         .expected = "an '=' or '(' after identifier",
@@ -192,53 +206,54 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
                 }
             },
             .keyword_fn => {
-                const return_type: ?Type, const after_return_type = blk: {
-                    const next_token = lex(vm.text, first_token.end);
-                    if (next_token.isVoid(vm.text)) break :blk .{ null, next_token.end };
-                    const return_type_value, const after_return_type = try vm.evalExpr(first_token.end);
-                    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-                    // defer TODO: clean up return_type_value
-                    break :blk .{ try vm.err.returnTypeFromValue(
-                        first_token.end,
-                        &return_type_value,
-                    ), after_return_type };
-                };
-                _ = return_type;
+                @panic("todo");
+                // const return_type: ?Type, const after_return_type = blk: {
+                //     const next_token = lex(vm.text, first_token.end);
+                //     if (next_token.isVoid(vm.text)) break :blk .{ null, next_token.end };
+                //     const return_type_value, const after_return_type = try vm.evalExpr(first_token.end);
+                //     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                //     // defer TODO: clean up return_type_value
+                //     break :blk .{ try vm.err.returnTypeFromValue(
+                //         first_token.end,
+                //         &return_type_value,
+                //     ), after_return_type };
+                // };
+                // _ = return_type;
 
-                const name_token = lex(vm.text, after_return_type);
-                switch (name_token.tag) {
-                    .identifier => {},
-                    else => return vm.err.set(.{ .unexpected_token = .{
-                        .expected = "a function name identifier",
-                        .token = name_token,
-                    } }),
-                }
-
-                // const name = vm.text[name_token.start..name_token.end];
-                // if (vm.symbol_table.getEntry(name)) |entry| {
-                //     _ = entry;
-                //     @panic("todo");
+                // const name_token = lex(vm.text, after_return_type);
+                // switch (name_token.tag) {
+                //     .identifier => {},
+                //     else => return vm.err.set(.{ .unexpected_token = .{
+                //         .expected = "a function name identifier",
+                //         .token = name_token,
+                //     } }),
                 // }
 
-                const after_open_paren = try eat(vm.text, &vm.err).token(name_token.end, .l_paren);
-                offset = after_open_paren;
-                while (true) {
-                    const next = lex(vm.text, offset);
-                    switch (next.tag) {
-                        .r_paren => {
-                            offset = next.end;
-                            break;
-                        },
-                        else => return vm.err.set(.{ .not_implemented = "fn with args" }),
-                    }
-                }
+                // // const name = vm.text[name_token.start..name_token.end];
+                // // if (vm.symbol_table.getEntry(name)) |entry| {
+                // //     _ = entry;
+                // //     @panic("todo");
+                // // }
 
-                // const entry = vm.symbol_table.getOrPut(
-                // {}
+                // const after_open_paren = try eat(vm.text, &vm.err).token(name_token.end, .l_paren);
+                // offset = after_open_paren;
+                // while (true) {
+                //     const next = lex(vm.text, offset);
+                //     switch (next.tag) {
+                //         .r_paren => {
+                //             offset = next.end;
+                //             break;
+                //         },
+                //         else => return vm.err.set(.{ .not_implemented = "fn with args" }),
+                //     }
+                // }
 
-                // const body_start = offset;
-                offset = try eat(vm.text, &vm.err).token(offset, .l_brace);
-                offset = try eat(vm.text, &vm.err).body(offset);
+                // // const entry = vm.symbol_table.getOrPut(
+                // // {}
+
+                // // const body_start = offset;
+                // offset = try eat(vm.text, &vm.err).token(offset, .l_brace);
+                // offset = try eat(vm.text, &vm.err).body(offset);
             },
             else => return vm.err.set(.{ .unexpected_token = .{
                 .expected = "an EOF, identifier, builtin or 'fn' keyword",
@@ -248,16 +263,17 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
     }
 }
 
-fn evalExpr(vm: *Vm, start: usize) error{Vm}!struct { ?Value, usize } {
+fn evalExpr(vm: *Vm, start: usize) error{Vm}!usize {
     const first_token = lex(vm.text, start);
     switch (first_token.tag) {
         .builtin => {
-            const id = vm.text[first_token.start..first_token.end];
-            const builtin = builtins.get(id) orelse return vm.err.set(.{ .unknown_builtin = first_token });
-            const next = try eat(vm.text, &vm.err).token(first_token.end, .l_paren);
-            const stack_before = vm.stack.items.len;
-            const arg_end = try vm.evalArgs(next);
-            return .{ try vm.evalBuiltin(first_token.extent(), builtin, stack_before), arg_end };
+            @panic("todo");
+            // const id = vm.text[first_token.start..first_token.end];
+            // const builtin = builtins.get(id) orelse return vm.err.set(.{ .unknown_builtin = first_token });
+            // const next = try eat(vm.text, &vm.err).token(first_token.end, .l_paren);
+            // const stack_before = vm.stack.items.len;
+            // const arg_end = try vm.evalArgs(next);
+            // return .{ try vm.evalBuiltin(first_token.extent(), builtin, stack_before), arg_end };
         },
         .identifier => {
             const id = vm.text[first_token.start..first_token.end];
@@ -272,10 +288,13 @@ fn evalExpr(vm: *Vm, start: usize) error{Vm}!struct { ?Value, usize } {
                 },
             }
         },
-        .string_literal => return .{ .{ .string_literal = .{
-            .start = first_token.start,
-            .end = first_token.end,
-        } }, first_token.end },
+        .string_literal => {
+            @panic("todo");
+            // return .{ .{ .string_literal = .{
+            //     .start = first_token.start,
+            //     .end = first_token.end,
+            //     } }, first_token.end },
+        },
         else => return vm.err.set(.{ .unexpected_token = .{
             .expected = "an expression",
             .token = first_token,
@@ -1782,9 +1801,11 @@ fn testBadCode(text: []const u8, expected_error: []const u8) !void {
     var vm: Vm = .{
         .mono_funcs = undefined,
         .mono_domain = undefined,
-        .allocator = gpa.allocator(),
+        // .allocator = gpa.allocator(),
         .err = undefined,
         .text = text,
+        .mem = .{ .allocator = gpa.allocator() },
+        .symbols = .{},
     };
     if (vm.interpret()) {
         return error.TestUnexpectedSuccess;
@@ -1811,3 +1832,4 @@ test "bad code" {
 
 const std = @import("std");
 const mono = @import("mono.zig");
+const Memory = @import("Memory.zig");

@@ -365,11 +365,12 @@ fn updateMods(
                 var vm: Vm = .{
                     .mono_funcs = mono_funcs,
                     .mono_domain = mono_domain,
-                    .allocator = scratch,
                     .text = state.text,
                     .err = undefined,
+                    .mem = .{ .allocator = scratch },
+                    .symbols = .{},
                 };
-                defer vm.deinit(scratch);
+                defer vm.deinit();
                 vm.interpret() catch {
                     std.log.err("{s}:{f}", .{ mod.name(), vm.err.fmt(state.text) });
                 };
