@@ -28,7 +28,7 @@ pub const Funcs = struct {
 
     signature_get_params: *const fn (*const MethodSignature, iter: *?*anyopaque) callconv(.c) ?*const Type,
 
-    runtime_invoke: *const fn (*const Method, obj: ?*anyopaque, params: ?**anyopaque, exception: **const Object) callconv(.c) ?*const Object,
+    runtime_invoke: *const fn (*const Method, obj: ?*anyopaque, params: ?**anyopaque, exception: ?**const Object) callconv(.c) ?*const Object,
     pub fn init(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!Funcs {
         return .{
             .get_root_domain = try monoload.get(mod, .get_root_domain, proc_ref),

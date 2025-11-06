@@ -495,10 +495,13 @@ fn evalExprSuffix(
                     .managed => |method| {
                         if (signature.param_count != 0) return vm.err.set(.{ .not_implemented = "calling managed functions with parameters" });
                         if (signature.return_type != null) return vm.err.set(.{ .not_implemented = "calling managed function with return types" });
-                        var exception: *const mono.Object = undefined;
-                        const result = vm.mono_funcs.runtime_invoke(method, null, null, &exception);
-                        _ = result;
-                        return vm.err.set(.{ .not_implemented = "finish calling managed method" });
+                        // var exception: *const mono.Object = undefined;
+                        // const result = vm.mono_funcs.runtime_invoke(method, null, null, &exception);
+                        const maybe_result = vm.mono_funcs.runtime_invoke(method, null, null, null);
+                        if (maybe_result) |result| {
+                            _ = result;
+                            return vm.err.set(.{ .not_implemented = "finish calling managed method" });
+                        }
                     },
                 }
 

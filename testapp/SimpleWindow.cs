@@ -114,6 +114,8 @@ class SimpleWindow : Form
             return;
         }
 
+        // Console.Beep();
+
         Application.EnableVisualStyles();
         Application.Run(new SimpleWindow());
     }
