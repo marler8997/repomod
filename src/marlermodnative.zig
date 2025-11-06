@@ -296,7 +296,7 @@ const Mod = struct {
 
 fn updateMods(
     mono_funcs: *const mono.Funcs,
-    mono_domain: *mono.Domain,
+    mono_domain: *const mono.Domain,
     scratch: std.mem.Allocator,
 ) void {
     {

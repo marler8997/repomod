@@ -38,6 +38,7 @@ pub const Funcs = struct {
             .class_from_name = try monoload.get(mod, .class_from_name, proc_ref),
             .class_get_method_from_name = try monoload.get(mod, .class_get_method_from_name, proc_ref),
             .method_signature = try monoload.get(mod, .method_signature, proc_ref),
+            .signature_get_params = try monoload.get(mod, .signature_get_params, proc_ref),
         };
     }
 };
