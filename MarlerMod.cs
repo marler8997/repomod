@@ -187,6 +187,15 @@ namespace MarlerMod
             }
 
             SendConsoleResponse(response);
+
+            // if (successCount > 0)
+            // {
+            //     logger.LogInfo("Attempting to sync player stats after upgrade...");
+            //     // This line is the *guess* at the necessary sync call for PUN.
+            //     // It's likely a method that iterates over all players and forces a state update.
+            //     PunManager.instance.SyncPlayerStats();
+            //     logger.LogInfo("SyncPlayerStats called.");
+            // }
         }
 
         private static int GetCurrentLevel(UpgradeKind kind, string steamID)
@@ -240,28 +249,35 @@ namespace MarlerMod
         private static List<string> GetAllPlayerSteamIDs()
         {
             List<string> steamIDs = new List<string>();
+            steamIDs.Add("76561198077730399"); // Johnny
+            steamIDs.Add("76561199195454462"); // Zach
+            steamIDs.Add("76561197963995344"); // Danny
+            steamIDs.Add("76561198142272856"); // Caleb
+            // // add Me as wel
+            // try
+            // {
+            //     PlayerController[] players = UnityEngine.Object.FindObjectsOfType<PlayerController>();
+            //     logger.LogInfo("Found " + players.Length + " PlayerController(s)");
 
-            try
-            {
-                PlayerController[] players = UnityEngine.Object.FindObjectsOfType<PlayerController>();
-                logger.LogInfo("Found " + players.Length + " PlayerController(s)");
-
-                foreach (PlayerController player in players)
-                {
-                    Photon.Pun.PhotonView photonView = player.GetComponent<Photon.Pun.PhotonView>();
-                    if (photonView != null && photonView.Owner != null)
-                    {
-                        string steamID = photonView.Owner.UserId;
-                        logger.LogInfo("Found player - UserId: " + steamID);
-                        steamIDs.Add(steamID);
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                logger.LogError("Failed to get all player Steam IDs: " + e.Message);
-                logger.LogError(e.StackTrace);
-            }
+            //     foreach (PlayerController player in players)
+            //     {
+            //         Photon.Pun.PhotonView photonView = player.GetComponent<Photon.Pun.PhotonView>();
+            //         if (photonView != null &&
+            //             photonView.Owner != null &&
+            //             photonView.Owner.IsLocal &&
+            //             !string.photonView.Owner.IsNullOrEmpty(UserId)
+            //         ) {
+            //             string steamID = photonView.Owner.UserId;
+            //             logger.LogInfo("Found player - UserId: " + steamID);
+            //             steamIDs.Add(steamID);
+            //         }
+            //     }
+            // }
+            // catch (Exception e)
+            // {
+            //     logger.LogError("Failed to get all player Steam IDs: " + e.Message);
+            //     logger.LogError(e.StackTrace);
+            // }
 
             return steamIDs;
         }
