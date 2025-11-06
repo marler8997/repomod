@@ -345,6 +345,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 const return_type_kind = vm.mono_funcs.type_get_type(return_type);
                 break :blk switch (return_type_kind) {
                     .void => null,
+                    .valuetype => return vm.err.set(.{ .not_implemented = "return valuetype" }),
                     else => |k| std.debug.panic(
                         "todo: handle return type '{?s}' ({})",
                         .{ std.enums.tagName(mono.TypeKind, k), @intFromEnum(k) },
@@ -992,9 +993,7 @@ fn logAssemblies(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.
         );
         return;
     };
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    std.debug.print("  assembly[{}] name='{s}'\n", .{ ctx.index, std.mem.span(str) });
-    // std.log.info("  assembly[{}] name='{s}'", .{ ctx.index, std.mem.span(str) });
+    std.log.info("  assembly[{}] name='{s}'", .{ ctx.index, std.mem.span(str) });
 }
 
 const Builtin = enum {
