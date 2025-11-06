@@ -2266,7 +2266,7 @@ const ErrorFmt = struct {
                 },
             ),
             .missing_class => |m| try writer.print(
-                "{d}: this assembly does not have a class named '{s}' in namespace {s}",
+                "{d}: this assembly does not have a class named {s} in namespace {s}",
                 .{
                     getLineNum(f.text, m.namespace.start),
                     f.text[m.name.start..m.name.end],
@@ -2339,7 +2339,7 @@ test "bad code" {
     );
     try testBadCode(
         "@Class(@Assembly(\"mscorlib\"), \"DoesNot\", \"Exist\")",
-        "1: this assembly does not have a class named '\"Exist\"' in namespace \"DoesNot\"",
+        "1: this assembly does not have a class named \"Exist\" in namespace \"DoesNot\"",
     );
     try testBadCode("999999999999999999999", "1: integer literal '999999999999999999999' doesn't fit in an i64");
     // try testBadCode("-999999999999999999999", "1: integer literal '-999999999999999999999' doesn't fit in an i64");
@@ -2401,9 +2401,16 @@ test {
     // try testCode("@Assembly(\"mscorlib\").System.Console()");
     if (false) try testCode(
         \\mscorlib = @Assembly("mscorlib")
-        \\console = @Class(mscorlib, "System", "Console")
-        \\import Beep 0 from console
-        \\Beep
+        \\
+        \\Console = @Class(mscorlib, "System", "Console")
+        \\import Beep 0 from Console
+        \\Beep()
+        \\
+        \\System = @Assembly("System")
+        \\Stopwatch = @Class(System, "System.Diagnostics", "Stopwatch")
+        \\import GetTimestamp 0 from Stopwatch
+        \\Stopwatch()
+        \\
         \\//import WriteLine 0 from console
         \\//WriteLine()
     );

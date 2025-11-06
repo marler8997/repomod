@@ -191,6 +191,13 @@ fn initMono() MonoState {
     };
     std.log.info("Mono domain created: 0x{x}", .{@intFromPtr(domain)});
 
+    if (funcs.domain_assembly_open(domain, "System.dll")) |assembly| {
+        _ = assembly;
+        std.log.info("System.dll: loaded", .{});
+    } else {
+        std.log.info("System.dll: not loaded", .{});
+    }
+
     switch (dll.kind) {
         .name => {},
         .repo_game => {
