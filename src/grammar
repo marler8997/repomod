@@ -2,12 +2,12 @@ Root <- Statement*
 Statement
    <- IfStatement
     / fn IDENTIFIER FnCallArguments Block
-    / import IDENTIFIER INTEGER from Expr
+    / import (KEYWORD_new / IDENTIFIER) INTEGER from Expr
     / IDENTIFIER EQUAL Expr
     / Expr (EQUAL Expr)?
 Expr  <- Expr2 (KEYWORD_or Expr2)*
 Expr2 <- Expr3 (KEYWORD_and Expr3)*
-...
+...ExprX eventually becomes PrimaryExpr
 PrimaryExpr
   <- IfExpr
    / KEYWORD_break Expr
@@ -20,6 +20,7 @@ ExprSuffix <- (SuffixOp / FnCallArguments)*
 
 PrimaryTypeExpr
     <- BUILTINIDENTIFIER FnCallArguments
+     / NEW IDENTIFIER FnCallArguments
      / CHAR_LITERAL
      ??? / ContainerDecl
      / DOT IDENTIFIER

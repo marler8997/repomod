@@ -97,9 +97,21 @@ const assemblies = [_]TestAssembly{
     .{ .name = .{ .cstr = "mscorlib" }, .image = .{
         .namespaces = &[_]Namespace{
             .{ .prefix = "System", .classes = &[_]TestClass{
+                .{ .name = "Object", .methods = &[_]TestMethod{
+                    .{ .name = ".ctor", .sig = .{
+                        .return_type = .{ .kind = .object },
+                        .param_count = 0,
+                    } },
+                } },
                 .{ .name = "Console", .methods = &[_]TestMethod{
-                    .{ .name = "WriteLine", .sig = .{ .return_type = .{ .kind = .void }, .param_count = 0 } },
-                    .{ .name = "Beep", .sig = .{ .return_type = .{ .kind = .void }, .param_count = 0 } },
+                    .{ .name = "WriteLine", .sig = .{
+                        .return_type = .{ .kind = .void },
+                        .param_count = 0,
+                    } },
+                    .{ .name = "Beep", .sig = .{
+                        .return_type = .{ .kind = .void },
+                        .param_count = 0,
+                    } },
                 } },
             } },
         },
@@ -184,8 +196,7 @@ fn test_method_signature(method_opaque: *const mono.Method) callconv(.c) ?*const
 
 fn test_signature_get_return_type(s: *const mono.MethodSignature) callconv(.c) ?*const mono.Type {
     const sig: *const TestMethodSignature = .fromMono(s);
-    _ = sig;
-    @panic("todo");
+    return sig.return_type.toMono();
 }
 
 fn test_signature_get_params(

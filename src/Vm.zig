@@ -43,88 +43,6 @@ const Type = enum {
 
 const TypeContext = enum { @"return", param };
 
-pub const Error = union(enum) {
-    not_implemented: [:0]const u8,
-    unexpected_token: struct { expected: [:0]const u8, token: Token },
-    unknown_builtin: Token,
-    undefined_identifier: Token,
-    num_literal_overflow: Extent,
-    called_non_function: struct {
-        start: usize,
-        unexpected_type: ?Type,
-    },
-    void_field: struct { start: usize },
-    no_field: struct {
-        start: usize,
-        field: Extent,
-        unexpected_type: Type,
-    },
-    too_many_assembly_fields: struct {
-        pos: usize,
-    },
-    arg_count: struct {
-        start: usize,
-        expected: u16,
-        actual: u16,
-    },
-    arg_type: struct {
-        arg_pos: usize,
-        arg_index: u16,
-        expected: Type,
-        actual: Type,
-    },
-    too_many_args: struct {
-        pos: usize,
-        param_count: u16,
-    },
-    import_from_non_class: struct {
-        pos: usize,
-        actual_type: ?Type,
-    },
-    needed_type: struct {
-        pos: usize,
-        context: TypeContext,
-        value: enum {
-            @"no value",
-            @"a string",
-            @"an assembly",
-        },
-    },
-    // an identifier was assigned a void value
-    void_assignment: struct {
-        id_extent: Extent,
-    },
-    void_argument: struct {
-        arg_index: u32,
-        first_arg_token: Token,
-    },
-    assembly_not_found: Extent,
-    id_too_big: Extent,
-    missing_class: struct {
-        assembly: *mono.Assembly,
-        namespace: Extent,
-        name: Extent,
-    },
-    missing_method: struct {
-        class: *mono.Class,
-        name: Extent,
-        param_count: i64,
-    },
-    oom,
-    pub fn set(err: *Error, value: Error) error{Vm} {
-        err.* = value;
-        return error.Vm;
-    }
-    pub fn setOom(err: *Error, e: error{OutOfMemory}) error{Vm} {
-        e catch {};
-        err.* = .oom;
-        return error.Vm;
-    }
-    pub fn fmt(err: *const Error, text: []const u8) ErrorFmt {
-        return .{ .err = err, .text = text };
-    }
-};
-
 fn getLineNum(text: []const u8, offset: usize) u32 {
     var line_num: u32 = 1;
     for (text[0..@min(text.len, offset)]) |c| {
@@ -276,17 +194,20 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             return .{ .statement_end = try eat(vm.text, &vm.err).evalBlock(offset) };
         },
         .keyword_import => {
-            const id_extent = blk: {
+            const name_kind: MethodNameKind, const name_extent: Extent = blk: {
                 const token = lex(vm.text, first_token.end);
-                if (token.tag != .identifier) return vm.err.set(.{ .unexpected_token = .{
-                    .expected = "an identifier after 'import'",
-                    .token = token,
-                } });
-                break :blk token.extent();
+                break :blk switch (token.tag) {
+                    .identifier => .{ .id, token.extent() },
+                    .keyword_new => .{ .new, token.extent() },
+                    else => return vm.err.set(.{ .unexpected_token = .{
+                        .expected = "an identifier or 'new' after 'import'",
+                        .token = token,
+                    } }),
+                };
             };
 
             const param_count: u16, const param_end = blk: {
-                const token = lex(vm.text, id_extent.end);
+                const token = lex(vm.text, name_extent.end);
                 if (token.tag != .number_literal) return vm.err.set(.{ .unexpected_token = .{
                     .expected = "an parameter count integer",
                     .token = token,
@@ -294,7 +215,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 const param_str = vm.text[token.start..token.end];
                 const value = std.fmt.parseInt(u16, param_str, 0) catch |err| switch (err) {
                     error.Overflow => return vm.err.set(.{ .num_literal_overflow = token.extent() }),
-                    error.InvalidCharacter => unreachable,
+                    error.InvalidCharacter => return vm.err.set(.{ .bad_num_literal = token.extent() }),
                 };
                 break :blk .{ value, token.end };
             };
@@ -322,11 +243,19 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             std.debug.assert(end_addr.eql(vm.mem.top()));
             _ = vm.mem.discardFrom(expr_addr);
 
-            const name = try vm.managedId(id_extent);
-            const method = vm.mono_funcs.class_get_method_from_name(class, name.slice(), param_count) orelse return vm.err.set(
+            var managed_id_buf: ManagedId = undefined;
+            const name: [:0]const u8 = blk: switch (name_kind) {
+                .id => {
+                    managed_id_buf = try vm.managedId(name_extent);
+                    break :blk managed_id_buf.slice();
+                },
+                .new => ".ctor",
+            };
+            const method = vm.mono_funcs.class_get_method_from_name(class, name, param_count) orelse return vm.err.set(
                 .{ .missing_method = .{
                     .class = class,
-                    .name = id_extent,
+                    .name_kind = name_kind,
+                    .name_extent = name_extent,
                     .param_count = param_count,
                 } },
             );
@@ -399,7 +328,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             const function_symbol: *Symbol = try vm.push(Symbol);
             function_symbol.* = .{
                 .list_node = .{},
-                .extent = id_extent,
+                .extent = name_extent,
                 .value_addr = function_value_addr,
             };
             vm.symbols.prepend(&function_symbol.list_node);
@@ -577,7 +506,7 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
         .identifier => {
             const string = vm.text[first_token.start..first_token.end];
             const symbol = vm.lookup(string) orelse return vm.err.set(
-                .{ .undefined_identifier = first_token },
+                .{ .undefined_identifier = first_token.extent() },
             );
             try vm.pushValueFromAddr(symbol.value_addr);
             return first_token.end;
@@ -600,11 +529,37 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
             const str = vm.text[first_token.start..first_token.end];
             const value = std.fmt.parseInt(i64, str, 10) catch |err| switch (err) {
                 error.Overflow => return vm.err.set(.{ .num_literal_overflow = first_token.extent() }),
-                error.InvalidCharacter => unreachable,
+                error.InvalidCharacter => return vm.err.set(.{ .bad_num_literal = first_token.extent() }),
             };
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = value;
             return first_token.end;
+        },
+        .keyword_new => {
+            const id_extent = blk: {
+                const token = lex(vm.text, first_token.end);
+                if (token.tag != .identifier) return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "an identifier to follow 'new'",
+                    .token = token,
+                } });
+                break :blk token.extent();
+            };
+            const id_string = vm.text[id_extent.start..id_extent.end];
+            const symbol = vm.lookup(id_string) orelse return vm.err.set(
+                .{ .undefined_identifier = id_extent },
+            );
+            const symbol_type, const value_addr = vm.readValue(Type, symbol.value_addr);
+            if (symbol_type != .class) return vm.err.set(.{ .new_non_class = .{
+                .id_extent = id_extent,
+                .actual_type = symbol_type,
+            } });
+            _ = value_addr;
+
+            const next = try eat(vm.text, &vm.err).eatToken(id_extent.end, .l_paren);
+            _ = next;
+            // const args_addr = vm.mem.top();
+            // const args_end = try vm.evalArgs(builtin.paramCount(), .{ .builtin = builtin.params() }, next);
+            return vm.err.set(.{ .not_implemented = "new expression" });
         },
         else => null,
     };
@@ -801,24 +756,27 @@ const VmEat = struct {
     fn eatToken(vm: VmEat, start: usize, what: enum {
         l_paren,
         l_brace,
+        identifier,
         identifier_from,
     }) error{Vm}!usize {
         const t = lex(vm.text, start);
         const expected_tag: Token.Tag = switch (what) {
             .l_paren => .l_paren,
             .l_brace => .l_brace,
+            .identifier => .identifier,
             .identifier_from => .identifier,
         };
         if (t.tag != expected_tag) return vm.err.set(.{ .unexpected_token = .{
             .expected = switch (what) {
                 .l_paren => "an open paren '('",
                 .l_brace => "an open brace '{'",
+                .identifier => "an identifier",
                 .identifier_from => "the 'from' keyword",
             },
             .token = t,
         } });
         switch (what) {
-            .l_paren, .l_brace => {},
+            .l_paren, .l_brace, .identifier => {},
             .identifier_from => if (!std.mem.eql(u8, vm.text[t.start..t.end], "from")) return vm.err.set(.{
                 .unexpected_token = .{
                     .expected = "the 'from' keyword",
@@ -911,8 +869,13 @@ const VmEat = struct {
             .string_literal,
             => return first_token.end,
             .builtin => {
-                const next = try vm.eatToken(first_token.end, .l_paren);
-                return try vm.evalArgs(next);
+                const after_l_paren = try vm.eatToken(first_token.end, .l_paren);
+                return try vm.evalArgs(after_l_paren);
+            },
+            .keyword_new => {
+                const after_id = try vm.eatToken(first_token.end, .identifier);
+                const after_l_paren = try vm.eatToken(after_id, .l_paren);
+                return try vm.evalArgs(after_l_paren);
             },
             else => null,
         };
@@ -1130,6 +1093,7 @@ const Token = struct {
         // container_doc_comment,
         keyword_fn,
         keyword_import,
+        keyword_new,
     };
     pub const Loc = struct {
         start: usize,
@@ -1154,6 +1118,7 @@ const Token = struct {
         // .{ "if", .keyword_if },
         .{ "import", .keyword_import },
         // .{ "inline", .keyword_inline },
+        .{ "new", .keyword_new },
         // .{ "noalias", .keyword_noalias },
         // .{ "noinline", .keyword_noinline },
         // .{ "nosuspend", .keyword_nosuspend },
@@ -1204,6 +1169,7 @@ const TokenFmt = struct {
             .number_literal => try writer.print("a number literal {s}", .{f.text[f.token.start..f.token.end]}),
             .keyword_fn => try writer.writeAll("the 'fn' keyword"),
             .keyword_import => try writer.writeAll("the 'import' keyword"),
+            .keyword_new => try writer.writeAll("the 'new' keyword"),
         }
     }
 };
@@ -2141,6 +2107,95 @@ test "lex" {
     }
 }
 
+const MethodNameKind = enum { id, new };
+
+pub const Error = union(enum) {
+    not_implemented: [:0]const u8,
+    unexpected_token: struct { expected: [:0]const u8, token: Token },
+    unknown_builtin: Token,
+    undefined_identifier: Extent,
+    num_literal_overflow: Extent,
+    bad_num_literal: Extent,
+    called_non_function: struct {
+        start: usize,
+        unexpected_type: ?Type,
+    },
+    void_field: struct { start: usize },
+    no_field: struct {
+        start: usize,
+        field: Extent,
+        unexpected_type: Type,
+    },
+    too_many_assembly_fields: struct {
+        pos: usize,
+    },
+    arg_count: struct {
+        start: usize,
+        expected: u16,
+        actual: u16,
+    },
+    arg_type: struct {
+        arg_pos: usize,
+        arg_index: u16,
+        expected: Type,
+        actual: Type,
+    },
+    too_many_args: struct {
+        pos: usize,
+        param_count: u16,
+    },
+    import_from_non_class: struct {
+        pos: usize,
+        actual_type: ?Type,
+    },
+    new_non_class: struct {
+        id_extent: Extent,
+        actual_type: Type,
+    },
+    needed_type: struct {
+        pos: usize,
+        context: TypeContext,
+        value: enum {
+            @"no value",
+            @"a string",
+            @"an assembly",
+        },
+    },
+    // an identifier was assigned a void value
+    void_assignment: struct {
+        id_extent: Extent,
+    },
+    void_argument: struct {
+        arg_index: u32,
+        first_arg_token: Token,
+    },
+    assembly_not_found: Extent,
+    id_too_big: Extent,
+    missing_class: struct {
+        assembly: *mono.Assembly,
+        namespace: Extent,
+        name: Extent,
+    },
+    missing_method: struct {
+        class: *mono.Class,
+        name_kind: MethodNameKind,
+        name_extent: Extent,
+        param_count: i64,
+    },
+    oom,
+    pub fn set(err: *Error, value: Error) error{Vm} {
+        err.* = value;
+        return error.Vm;
+    }
+    pub fn setOom(err: *Error, e: error{OutOfMemory}) error{Vm} {
+        e catch {};
+        err.* = .oom;
+        return error.Vm;
+    }
+    pub fn fmt(err: *const Error, text: []const u8) ErrorFmt {
+        return .{ .err = err, .text = text };
+    }
+};
 const ErrorFmt = struct {
     err: *const Error,
     text: []const u8,
@@ -2171,6 +2226,10 @@ const ErrorFmt = struct {
             ),
             .num_literal_overflow => |e| try writer.print(
                 "{d}: integer literal '{s}' doesn't fit in an i64",
+                .{ getLineNum(f.text, e.start), f.text[e.start..e.end] },
+            ),
+            .bad_num_literal => |e| try writer.print(
+                "{d}: invalid integer literal '{s}'",
                 .{ getLineNum(f.text, e.start), f.text[e.start..e.end] },
             ),
             .called_non_function => |e| if (e.unexpected_type) |t| try writer.print(
@@ -2226,6 +2285,14 @@ const ErrorFmt = struct {
                 "{d}: import from requires a class but the expression yielded nothing",
                 .{getLineNum(f.text, i.pos)},
             ),
+            .new_non_class => |n| try writer.print(
+                "{d}: cannot new '{s}' which is {s}",
+                .{
+                    getLineNum(f.text, n.id_extent.start),
+                    f.text[n.id_extent.start..n.id_extent.end],
+                    n.actual_type.what(),
+                },
+            ),
             .needed_type => |n| try writer.print(
                 "{d}: expected a {s} type but got {s}",
                 .{
@@ -2272,14 +2339,23 @@ const ErrorFmt = struct {
                     f.text[m.namespace.start..m.namespace.end],
                 },
             ),
-            .missing_method => |m| try writer.print(
-                "{d}: method {s} with {} params does not exist in this class",
-                .{
-                    getLineNum(f.text, m.name.start),
-                    f.text[m.name.start..m.name.end],
-                    m.param_count,
-                },
-            ),
+            .missing_method => |m| switch (m.name_kind) {
+                .new => try writer.print(
+                    "{d}: .ctor with {} params does not exist in this class",
+                    .{
+                        getLineNum(f.text, m.name_extent.start),
+                        m.param_count,
+                    },
+                ),
+                .id => try writer.print(
+                    "{d}: method {s} with {} params does not exist in this class",
+                    .{
+                        getLineNum(f.text, m.name_extent.start),
+                        f.text[m.name_extent.start..m.name_extent.end],
+                        m.param_count,
+                    },
+                ),
+            },
             .oom => try writer.writeAll("out of memory"),
         }
     }
@@ -2313,7 +2389,7 @@ fn testBadCode(text: []const u8, expected_error: []const u8) !void {
 test "bad code" {
     try testBadCode("example_id = @Nothing()", "1: nothing was assigned to identifier 'example_id'");
     try testBadCode("fn", "1: syntax error: expected an identifier after 'fn' but got EOF");
-    try testBadCode("import", "1: syntax error: expected an identifier after 'import' but got EOF");
+    try testBadCode("import", "1: syntax error: expected an identifier or 'new' after 'import' but got EOF");
     try testBadCode("fn a", "1: syntax error: expected an open paren '(' but got EOF");
     try testBadCode("fn @Nothing()", "1: syntax error: expected an identifier after 'fn' but got the builtin function '@Nothing'");
     try testBadCode("fn foo", "1: syntax error: expected an open paren '(' but got EOF");
@@ -2352,9 +2428,13 @@ test "bad code" {
         \\import writeline 65536 from console
     , "3: method \"WriteLine\" with 9223372036854775807 params does not exist in this class");
 
-    // try testBadCode("fn foo(){}fn foo(){}", "");
-    // try testBadCode("fn void foo(){} fn void foo(){}", "");
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    try testBadCode("new", "1: syntax error: expected an identifier to follow 'new' but got EOF");
+    try testBadCode("new 0", "1: syntax error: expected an identifier to follow 'new' but got a number literal 0");
+    // try testBadCode("new foo(", "");
+    try testBadCode("new foo()", "1: undefined identifier 'foo'");
+    try testBadCode("foo=0 new foo()", "1: cannot new 'foo' which is an integer");
+
+    try testBadCode("0n", "1: invalid integer literal '0n'");
 }
 
 fn testCode(text: []const u8) !void {
@@ -2398,6 +2478,14 @@ test {
     // try testCode("@Assembly(\"mscorlib\").Class");
 
     // try testCode("@Assembly(\"mscorlib\").System.Console()");
+    try testCode(
+        \\mscorlib = @Assembly("mscorlib")
+        \\Object = @Class(mscorlib, "System", "Object")
+        \\import new 0 from Object
+        \\example_obj = new Object()
+        \\
+    );
+
     if (false) try testCode(
         \\mscorlib = @Assembly("mscorlib")
         \\
