@@ -238,7 +238,7 @@ fn test_runtime_invoke(
     method_opaque: *const mono.Method,
     obj: ?*anyopaque,
     params: ?**anyopaque,
-    exception: ?**const mono.Object,
+    exception: ?*?*const mono.Object,
 ) callconv(.c) ?*const mono.Object {
     const method: *const TestMethod = .fromMono(method_opaque);
     _ = obj;
