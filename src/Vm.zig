@@ -98,7 +98,7 @@ const ManagedId = struct {
     pub fn append(self: *ManagedId, s: []const u8) error{NoSpaceLeft}!void {
         if (self.len + s.len > max) return error.NoSpaceLeft;
         @memcpy(self.buf[self.len..][0..s.len], s);
-        self.buf[s.len] = 0;
+        self.buf[self.len + s.len] = 0;
         self.len += @intCast(s.len);
     }
 };
@@ -497,23 +497,47 @@ fn evalExprSuffix(
                     .id_extent = method_id_extent,
                     .arg_count = args.count,
                 } });
+                const method_sig = vm.mono_funcs.method_signature(method) orelse @panic(
+                    "method has no signature?", // impossible right?
+                );
+                const return_type = vm.mono_funcs.signature_get_return_type(method_sig) orelse @panic(
+                    "method has no return type?", // impossible right?
+                );
+                if (args.count == 0) {
+                    std.debug.assert(args_addr.eql(vm.mem.top()));
+                    // TODO: add check that scans to see if anyone is pointing to discarded memory?
+                    // _ = vm.mem.discardFrom(expr_addr);
+                } else {
+                    return vm.err.set(.{ .not_implemented = "call method with args" });
+                }
 
-                if (args.count != 0) return vm.err.set(.{ .not_implemented = "call method with args" });
                 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                 // TODO: how do we know if we need an object
                 const object: ?*anyopaque = null;
                 const params: ?**anyopaque = null;
-                var exception: ?*const mono.Object = null;
+                var maybe_exception: ?*const mono.Object = null;
 
-                const maybe_result = vm.mono_funcs.runtime_invoke(method, object, params, &exception);
+                const maybe_result = vm.mono_funcs.runtime_invoke(
+                    method,
+                    object,
+                    params,
+                    &maybe_exception,
+                );
                 std.debug.print(
                     "Result=0x{x} Exception=0x{x}\n",
-                    .{ @intFromPtr(maybe_result), @intFromPtr(exception) },
+                    .{ @intFromPtr(maybe_result), @intFromPtr(maybe_exception) },
                 );
-                // const return_type = vm.mono_funcs.signature_get_return_type(
-                // TODO: get the return type
-                _ = args_addr;
-                return vm.err.set(.{ .not_implemented = "call class member" });
+                if (maybe_exception) |e| {
+                    std.log.err("TODO: handle exception 0x{x}\n", .{@intFromPtr(e)});
+                    return vm.err.set(.{ .not_implemented = "handle exception" });
+                }
+                switch (vm.mono_funcs.type_get_type(return_type)) {
+                    .void => if (maybe_result) |_| {
+                        return vm.err.set(.{ .not_implemented = "error message for calling managed function with void return type that returned something" });
+                    },
+                    else => return vm.err.set(.{ .not_implemented = "managed return value of this type" }),
+                }
+                return args.end;
             } else if (expr_type == .function) {
                 const signature_addr, const end_addr = vm.readValue(Memory.Addr, expr_value_addr);
                 std.debug.assert(end_addr.eql(vm.mem.top()));
@@ -1018,6 +1042,7 @@ fn lexClass(text: []const u8, namespace: *ManagedId, name: *ManagedId, start: us
     var it: DottedIterator = .init(text, start);
     var previous = it.id;
     while (it.next(text)) {
+        if (namespace.len > 0) namespace.append(".") catch return previous.end;
         namespace.append(text[previous.start..previous.end]) catch return previous.end;
         previous = it.id;
     }
@@ -2800,7 +2825,7 @@ test {
         \\mscorlib = @Assembly("mscorlib")
         \\
         \\Console = @Class(mscorlib.System.Console)
-        \\//Console.Beep()
+        \\Console.Beep()
         \\
         \\//sys = @Assembly("System")
         \\//Stopwatch = @Class(sys.System.Diagnostics.Stopwatch)
