@@ -140,21 +140,6 @@ pub export fn _DllMainCRTStartup(
 fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
     std.log.info("Init Thread running!", .{});
-    var stdout = std.fs.File.stdout().writer(&.{});
-    stdout.interface.writeAll("stdout is working\n") catch {
-        std.log.err(
-            "write to stdout failed with {t}",
-            .{stdout.err orelse error.Unexpected},
-        );
-    };
-    var stderr = std.fs.File.stderr().writer(&.{});
-    stderr.interface.writeAll("stderr is working\n") catch {
-        std.log.err(
-            "write to stderr failed with {t}",
-            .{stderr.err orelse error.Unexpected},
-        );
-    };
-
     // if (win32.AddVectoredExceptionHandler(1, on_vectored_exception)) |_| {
     //     std.log.info("AddVectoredExceptionHandler success", .{});
     // } else {
@@ -206,7 +191,6 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         var attempt: u32 = 0;
         while (true) {
             attempt += 1;
-
             if (mono_funcs.get_root_domain()) |domain| {
                 std.log.info("Mono root domain found: 0x{x}", .{@intFromPtr(domain)});
                 break :blk domain;
@@ -589,15 +573,6 @@ fn fmtMsgbox(
     //defer global.arena.free(msg);
     return win32.MessageBoxA(null, msg, title, style);
 }
-
-// fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
-//     //if (global.log_file) |f| {
-//     //    f.writer().writeAll("fatal: ") catch { };
-//     //    f.writer().print(fmt, args) catch { };
-//     //}
-//     _ = msgbox(.{}, "MarlerMod.dll: Fatal Error", fmt, args);
-//     win32.ExitProcess(0xff);
-// }
 
 const std = @import("std");
 const win32 = @import("win32").everything;
