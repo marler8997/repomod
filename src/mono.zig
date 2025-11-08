@@ -13,6 +13,7 @@ pub const Callback = fn (data: *anyopaque, user_data: ?*anyopaque) callconv(.c) 
 
 pub const Funcs = struct {
     get_root_domain: *const fn () callconv(.c) ?*const Domain,
+    domain_get: *const fn () callconv(.c) ?*const Domain,
     thread_attach: *const fn (?*const Domain) callconv(.c) ?*const Thread,
     // domain_assembly_open: *const fn (*const Domain, [*:0]const u8) callconv(.c) ?*const Assembly,
 

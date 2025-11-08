@@ -1,7 +1,6 @@
 const Vm = @This();
 
 mono_funcs: *const mono.Funcs,
-mono_domain: *const mono.Domain,
 err: Error,
 text: []const u8,
 mem: Memory,
@@ -615,7 +614,7 @@ fn evalExprSuffix(
                     .managed_ctor => |ctor| {
                         const class = vm.mono_funcs.method_get_class(ctor) orelse unreachable;
                         const obj = vm.mono_funcs.object_new(
-                            vm.mono_domain,
+                            vm.mono_funcs.domain_get().?,
                             class,
                         ) orelse return vm.err.set(
                             .{ .new_failed = .{ .pos = suffix_op_token.start, .class = class } },
@@ -2719,12 +2718,18 @@ const ErrorFmt = struct {
 
 fn testBadCode(text: []const u8, expected_error: []const u8) !void {
     std.debug.print("testing bad code:\n---\n{s}\n---\n", .{text});
+
+    var domain: monomock.Domain = .{};
+    defer domain.deinit();
+
+    monomock.setGlobalActiveDomain(&domain);
+    defer monomock.unsetGlobalActiveDomain(&domain);
+
     var buffer: [4096 * 2]u8 = undefined;
     std.debug.assert(buffer.len >= std.heap.pageSize());
     var vm_fixed_fba: std.heap.FixedBufferAllocator = .init(&buffer);
     var vm: Vm = .{
         .mono_funcs = &monomock.funcs,
-        .mono_domain = undefined,
         .err = undefined,
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
@@ -2809,12 +2814,18 @@ test "bad code" {
 
 fn testCode(text: []const u8) !void {
     std.debug.print("testing code:\n---\n{s}\n---\n", .{text});
+
+    var domain: monomock.Domain = .{};
+    defer domain.deinit();
+
+    monomock.setGlobalActiveDomain(&domain);
+    defer monomock.unsetGlobalActiveDomain(&domain);
+
     var buffer: [4096 * 2]u8 = undefined;
     std.debug.assert(buffer.len >= std.heap.pageSize());
     var vm_fixed_fba: std.heap.FixedBufferAllocator = .init(&buffer);
     var vm: Vm = .{
         .mono_funcs = &monomock.funcs,
-        .mono_domain = undefined,
         .err = undefined,
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
@@ -2877,7 +2888,8 @@ test {
         \\Console.WriteLine()
         \\//Console.WriteLine("Hello")
         \\Environment = @Class(mscorlib.System.Environment)
-        \\//Environment.get_TickCount()
+        \\//@Discard(Environment.get_TickCount())
+        \\//@Discard(Environment.get_MachineName())
         \\
         \\//sys = @Assembly("System")
         \\//Stopwatch = @Class(sys.System.Diagnostics.Stopwatch)

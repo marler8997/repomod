@@ -1,119 +1,160 @@
+const global = struct {
+    // TODO: make this thread-local if we want to support multithreading
+    var active_domain: ?struct {
+        thread_id: std.Thread.Id,
+        domain: *Domain,
+    } = null;
+};
+pub fn setGlobalActiveDomain(domain: *Domain) void {
+    std.debug.assert(global.active_domain == null);
+    global.active_domain = .{
+        .thread_id = std.Thread.getCurrentId(),
+        .domain = domain,
+    };
+}
+pub fn unsetGlobalActiveDomain(domain: *Domain) void {
+    std.debug.assert(global.active_domain.?.thread_id == std.Thread.getCurrentId());
+    std.debug.assert(global.active_domain.?.domain == domain);
+    global.active_domain = null;
+}
+
 pub const funcs: mono.Funcs = .{
-    .get_root_domain = test_get_root_domain,
-    .thread_attach = test_thread_attach,
-    .assembly_foreach = test_assembly_foreach,
-    .assembly_get_name = test_assembly_get_name,
-    .assembly_get_image = test_assembly_get_image,
-    .assembly_name_get_name = test_assembly_name_get_name,
-    .class_from_name = test_class_from_name,
-    .class_get_method_from_name = test_class_get_method_from_name,
-    .method_get_flags = test_method_get_flags,
-    .method_signature = test_method_signature,
-    .method_get_class = test_method_get_class,
-    .signature_get_return_type = test_signature_get_return_type,
-    .signature_get_params = test_signature_get_params,
-    .type_get_type = test_type_get_type,
-    .object_new = test_object_new,
-    .object_unbox = test_object_unbox,
-    .runtime_invoke = test_runtime_invoke,
+    .get_root_domain = mock_get_root_domain,
+    .domain_get = mock_domain_get,
+    .thread_attach = mock_thread_attach,
+    .assembly_foreach = mock_assembly_foreach,
+    .assembly_get_name = mock_assembly_get_name,
+    .assembly_get_image = mock_assembly_get_image,
+    .assembly_name_get_name = mock_assembly_name_get_name,
+    .class_from_name = mock_class_from_name,
+    .class_get_method_from_name = mock_class_get_method_from_name,
+    .method_get_flags = mock_method_get_flags,
+    .method_signature = mock_method_signature,
+    .method_get_class = mock_method_get_class,
+    .signature_get_return_type = mock_signature_get_return_type,
+    .signature_get_params = mock_signature_get_params,
+    .type_get_type = mock_type_get_type,
+    .object_new = mock_object_new,
+    .object_unbox = mock_object_unbox,
+    .runtime_invoke = mock_runtime_invoke,
 };
 
-fn test_get_root_domain() callconv(.c) ?*const mono.Domain {
+pub const Domain = struct {
+    pub fn deinit(domain: *Domain) void {
+        _ = domain;
+    }
+    pub fn fromMono(domain: *const mono.Domain) *const Domain {
+        return @ptrCast(@alignCast(domain));
+    }
+    pub fn toMono(domain: *const Domain) *const mono.Domain {
+        return @ptrCast(domain);
+    }
+};
+
+fn mock_get_root_domain() callconv(.c) ?*const mono.Domain {
+    @panic("shouldn't be called");
+}
+fn mock_domain_get() callconv(.c) ?*const mono.Domain {
+    if (global.active_domain) |*active| {
+        std.debug.assert(active.thread_id == std.Thread.getCurrentId());
+        return active.domain.toMono();
+    }
     return null;
 }
-fn test_thread_attach(_: ?*const mono.Domain) callconv(.c) ?*const mono.Thread {
-    return null;
+fn mock_thread_attach(_: ?*const mono.Domain) callconv(.c) ?*const mono.Thread {
+    @panic("shouldn't be called");
 }
-const TestAssembly = struct {
-    name: TestAssemblyName,
-    image: TestImage,
-    pub fn fromMono(assembly: *const mono.Assembly) *const TestAssembly {
+
+const MockAssembly = struct {
+    name: MockAssemblyName,
+    image: MockImage,
+    pub fn fromMono(assembly: *const mono.Assembly) *const MockAssembly {
         return @ptrCast(@alignCast(assembly));
     }
-    pub fn toMono(assembly: *const TestAssembly) *const mono.Assembly {
+    pub fn toMono(assembly: *const MockAssembly) *const mono.Assembly {
         return @ptrCast(assembly);
     }
 };
-const TestImage = struct {
+const MockImage = struct {
     namespaces: []const Namespace,
-    pub fn fromMono(image: *const mono.Image) *const TestImage {
+    pub fn fromMono(image: *const mono.Image) *const MockImage {
         return @ptrCast(@alignCast(image));
     }
-    pub fn toMono(image: *const TestImage) *const mono.Image {
+    pub fn toMono(image: *const MockImage) *const mono.Image {
         return @ptrCast(image);
     }
 };
 const Namespace = struct {
     prefix: [:0]const u8,
-    classes: []const TestClass,
+    classes: []const MockClass,
 };
 
-const TestAssemblyName = struct {
+const MockAssemblyName = struct {
     cstr: [:0]const u8,
-    pub fn fromMono(name: *const mono.AssemblyName) *const TestAssemblyName {
+    pub fn fromMono(name: *const mono.AssemblyName) *const MockAssemblyName {
         return @ptrCast(@alignCast(name));
     }
-    pub fn toMono(name: *const TestAssemblyName) *const mono.AssemblyName {
+    pub fn toMono(name: *const MockAssemblyName) *const mono.AssemblyName {
         return @ptrCast(name);
     }
 };
-const TestClass = struct {
+const MockClass = struct {
     name: [:0]const u8,
-    methods: []const TestMethod,
-    pub fn fromMono(class: *const mono.Class) *const TestClass {
+    methods: []const MockMethod,
+    pub fn fromMono(class: *const mono.Class) *const MockClass {
         return @ptrCast(@alignCast(class));
     }
-    pub fn toMono(class: *const TestClass) *const mono.Class {
+    pub fn toMono(class: *const MockClass) *const mono.Class {
         return @ptrCast(class);
     }
 };
-const TestMethod = struct {
+const MockMethod = struct {
     name: [:0]const u8,
-    sig: TestMethodSignature,
-    pub fn fromMono(method: *const mono.Method) *const TestMethod {
+    sig: MockMethodSignature,
+    pub fn fromMono(method: *const mono.Method) *const MockMethod {
         return @ptrCast(@alignCast(method));
     }
-    pub fn toMono(method: *const TestMethod) *const mono.Method {
+    pub fn toMono(method: *const MockMethod) *const mono.Method {
         return @ptrCast(method);
     }
 };
-const TestMethodSignature = struct {
-    return_type: TestType,
+const MockMethodSignature = struct {
+    return_type: MockType,
     param_count: c_int,
-    pub fn fromMono(sig: *const mono.MethodSignature) *const TestMethodSignature {
+    pub fn fromMono(sig: *const mono.MethodSignature) *const MockMethodSignature {
         return @ptrCast(@alignCast(sig));
     }
-    pub fn toMono(sig: *const TestMethodSignature) *const mono.MethodSignature {
+    pub fn toMono(sig: *const MockMethodSignature) *const mono.MethodSignature {
         return @ptrCast(sig);
     }
 };
-const TestType = struct {
+const MockType = struct {
     kind: mono.TypeKind,
-    pub fn fromMono(t: *const mono.Type) *const TestType {
+    pub fn fromMono(t: *const mono.Type) *const MockType {
         return @ptrCast(@alignCast(t));
     }
-    pub fn toMono(t: *const TestType) *const mono.Type {
+    pub fn toMono(t: *const MockType) *const mono.Type {
         return @ptrCast(t);
     }
 };
 
-const assemblies = [_]TestAssembly{
+const assemblies = [_]MockAssembly{
     .{ .name = .{ .cstr = "mscorlib" }, .image = .{
         .namespaces = &[_]Namespace{
-            .{ .prefix = "System", .classes = &[_]TestClass{
-                .{ .name = "Object", .methods = &[_]TestMethod{
+            .{ .prefix = "System", .classes = &[_]MockClass{
+                .{ .name = "Object", .methods = &[_]MockMethod{
                     .{ .name = ".ctor", .sig = .{
                         .return_type = .{ .kind = .object },
                         .param_count = 0,
                     } },
                 } },
-                .{ .name = "Environment", .methods = &[_]TestMethod{
+                .{ .name = "Environment", .methods = &[_]MockMethod{
                     .{ .name = "get_TickCount", .sig = .{
                         .return_type = .{ .kind = .i4 },
                         .param_count = 0,
                     } },
                 } },
-                .{ .name = "Console", .methods = &[_]TestMethod{
+                .{ .name = "Console", .methods = &[_]MockMethod{
                     .{ .name = "WriteLine", .sig = .{
                         .return_type = .{ .kind = .void },
                         .param_count = 0,
@@ -132,8 +173,8 @@ const assemblies = [_]TestAssembly{
     } },
     .{ .name = .{ .cstr = "ExAssembly" }, .image = .{
         .namespaces = &[_]Namespace{
-            .{ .prefix = "ExNs", .classes = &[_]TestClass{
-                .{ .name = "ExClass", .methods = &[_]TestMethod{
+            .{ .prefix = "ExNs", .classes = &[_]MockClass{
+                .{ .name = "ExClass", .methods = &[_]MockMethod{
                     .{ .name = "ExMethod", .sig = .{
                         .return_type = .{ .kind = .void },
                         .param_count = 0,
@@ -144,29 +185,29 @@ const assemblies = [_]TestAssembly{
     } },
 };
 
-fn test_assembly_foreach(func: *const mono.Callback, user_data: ?*anyopaque) callconv(.c) void {
+fn mock_assembly_foreach(func: *const mono.Callback, user_data: ?*anyopaque) callconv(.c) void {
     for (&assemblies) |*assembly| {
         func(@ptrCast(@constCast(assembly)), user_data);
     }
 }
-fn test_assembly_get_name(a: *const mono.Assembly) callconv(.c) ?*const mono.AssemblyName {
-    const assembly: *const TestAssembly = .fromMono(a);
+fn mock_assembly_get_name(a: *const mono.Assembly) callconv(.c) ?*const mono.AssemblyName {
+    const assembly: *const MockAssembly = .fromMono(a);
     return assembly.name.toMono();
 }
-fn test_assembly_get_image(a: *const mono.Assembly) callconv(.c) ?*const mono.Image {
-    const assembly: *const TestAssembly = .fromMono(a);
+fn mock_assembly_get_image(a: *const mono.Assembly) callconv(.c) ?*const mono.Image {
+    const assembly: *const MockAssembly = .fromMono(a);
     return assembly.image.toMono();
 }
-fn test_assembly_name_get_name(n: *const mono.AssemblyName) callconv(.c) ?[*:0]const u8 {
-    const name: *const TestAssemblyName = .fromMono(n);
+fn mock_assembly_name_get_name(n: *const mono.AssemblyName) callconv(.c) ?[*:0]const u8 {
+    const name: *const MockAssemblyName = .fromMono(n);
     return name.cstr;
 }
-fn test_class_from_name(
+fn mock_class_from_name(
     image_opaque: *const mono.Image,
     namespace_ptr: [*:0]const u8,
     name_ptr: [*:0]const u8,
 ) callconv(.c) ?*const mono.Class {
-    const image: *const TestImage = .fromMono(image_opaque);
+    const image: *const MockImage = .fromMono(image_opaque);
 
     const wanted_namespace = std.mem.span(namespace_ptr);
     const wanted_name = std.mem.span(name_ptr);
@@ -179,12 +220,12 @@ fn test_class_from_name(
         if (std.mem.eql(u8, class.name, wanted_name)) return class.toMono();
     } else null;
 }
-fn test_class_get_method_from_name(
+fn mock_class_get_method_from_name(
     c: *const mono.Class,
     name_ptr: [*:0]const u8,
     param_count: c_int,
 ) callconv(.c) ?*const mono.Method {
-    const class: *const TestClass = .fromMono(c);
+    const class: *const MockClass = .fromMono(c);
     const name = std.mem.span(name_ptr);
     for (class.methods) |*method| {
         if (method.sig.param_count != param_count) continue;
@@ -193,23 +234,23 @@ fn test_class_get_method_from_name(
     return null;
 }
 
-fn test_method_get_flags(
+fn mock_method_get_flags(
     method_opaque: *const mono.Method,
     iflags: ?*mono.MethodFlags,
 ) callconv(.c) mono.MethodFlags {
-    const method: *const TestMethod = @ptrCast(@alignCast(method_opaque));
+    const method: *const MockMethod = @ptrCast(@alignCast(method_opaque));
     _ = method;
     _ = iflags;
     return .{ .protection = .public, .static = true };
 }
 
-fn test_method_signature(method_opaque: *const mono.Method) callconv(.c) ?*const mono.MethodSignature {
-    const method: *const TestMethod = @ptrCast(@alignCast(method_opaque));
+fn mock_method_signature(method_opaque: *const mono.Method) callconv(.c) ?*const mono.MethodSignature {
+    const method: *const MockMethod = @ptrCast(@alignCast(method_opaque));
     return method.sig.toMono();
 }
 
-fn test_method_get_class(method_opaque: *const mono.Method) callconv(.c) ?*const mono.Class {
-    const method: *const TestMethod = @ptrCast(@alignCast(method_opaque));
+fn mock_method_get_class(method_opaque: *const mono.Method) callconv(.c) ?*const mono.Class {
+    const method: *const MockMethod = @ptrCast(@alignCast(method_opaque));
     for (assemblies) |assembly| {
         _ = assembly;
         _ = method;
@@ -217,27 +258,27 @@ fn test_method_get_class(method_opaque: *const mono.Method) callconv(.c) ?*const
     @panic("todo");
 }
 
-fn test_signature_get_return_type(s: *const mono.MethodSignature) callconv(.c) ?*const mono.Type {
-    const sig: *const TestMethodSignature = .fromMono(s);
+fn mock_signature_get_return_type(s: *const mono.MethodSignature) callconv(.c) ?*const mono.Type {
+    const sig: *const MockMethodSignature = .fromMono(s);
     return sig.return_type.toMono();
 }
 
-fn test_signature_get_params(
+fn mock_signature_get_params(
     s: *const mono.MethodSignature,
     iter: *?*anyopaque,
 ) callconv(.c) ?*const mono.Type {
-    const sig: *const TestMethodSignature = .fromMono(s);
+    const sig: *const MockMethodSignature = .fromMono(s);
     if (sig.param_count > 0) @panic("todo");
     _ = iter;
     return null;
 }
 
-fn test_type_get_type(type_opaque: *const mono.Type) callconv(.c) mono.TypeKind {
-    const t: *const TestType = .fromMono(type_opaque);
+fn mock_type_get_type(type_opaque: *const mono.Type) callconv(.c) mono.TypeKind {
+    const t: *const MockType = .fromMono(type_opaque);
     return t.kind;
 }
 
-fn test_object_new(
+fn mock_object_new(
     domain: *const mono.Domain,
     class: *const mono.Class,
 ) callconv(.c) ?*const mono.Object {
@@ -246,25 +287,28 @@ fn test_object_new(
     return null;
 }
 
-fn test_object_unbox(object: *const mono.Object) callconv(.c) *anyopaque {
+fn mock_object_unbox(object: *const mono.Object) callconv(.c) *anyopaque {
     _ = object;
     @panic("todo");
 }
 
-fn test_runtime_invoke(
+fn mock_runtime_invoke(
     method_opaque: *const mono.Method,
     obj: ?*anyopaque,
     params: ?**anyopaque,
     exception: ?*?*const mono.Object,
 ) callconv(.c) ?*const mono.Object {
-    const method: *const TestMethod = .fromMono(method_opaque);
-    // std.debug.print("monomock: TestMethod '{s}' has been called\n", .{method.name});
+    const method: *const MockMethod = .fromMono(method_opaque);
+    // std.debug.print("monomock: MockMethod '{s}' has been called\n", .{method.name});
     if (method.sig.param_count != 0) @panic("todo: implement params");
     _ = obj;
     _ = params;
     _ = exception;
     switch (method.sig.return_type.kind) {
         .void => return null,
+        .i4 => {
+            @panic("todo: implement 32-bit integer return type");
+        },
         else => std.debug.panic("todo: implement non-void return type", .{}),
     }
 }
