@@ -523,6 +523,7 @@ fn evalExprSuffix(
                 .start = expr_first_token.start,
                 .unexpected_type = null,
             } });
+
             const expr_type, const expr_value_addr = vm.readValue(Type, expr_addr);
             if (expr_type == .class_member) {
                 const class, const id_start_addr = vm.readValue(*const mono.Class, expr_value_addr);
@@ -951,26 +952,19 @@ fn evalBuiltin(
             std.log.info("mono_assembly_foreach done", .{});
         },
         .@"@Assembly" => {
-            const arg_type, const token_start_addr = vm.readValue(Type, args_addr);
-            std.debug.assert(arg_type == .string_literal);
-            const token_start, const end_addr = vm.readValue(usize, token_start_addr);
-            std.debug.assert(vm.text[token_start] == '"');
-            std.debug.assert(end_addr.eql(vm.mem.top()));
-            // TODO: add check that scans to see if anyone is pointing to discarded memory?
-            _ = vm.mem.discardFrom(args_addr);
-            const token = lex(vm.text, token_start);
-            std.debug.assert(token.tag == .string_literal);
-            std.debug.assert(vm.text[token.end - 1] == '"');
-            const slice = vm.text[token_start + 1 .. token.end - 1];
+            const extent = switch (vm.pop(args_addr)) {
+                .string_literal => |e| e,
+                else => unreachable,
+            };
             var context: FindAssembly = .{
                 .vm = vm,
                 .index = 0,
-                .needle = slice,
+                .needle = vm.text[extent.start + 1 .. extent.end - 1],
                 .match = null,
             };
             vm.mono_funcs.assembly_foreach(&findAssembly, &context);
             const match = context.match orelse return vm.err.set(
-                .{ .assembly_not_found = token.extent() },
+                .{ .assembly_not_found = extent },
             );
             (try vm.push(Type)).* = .assembly;
             (try vm.push(*const mono.Assembly)).* = match;
@@ -1121,6 +1115,27 @@ fn lookup(vm: *Vm, needle: []const u8) ?SymbolEntry {
 
 fn push(vm: *Vm, comptime T: type) error{Vm}!*T {
     return vm.mem.push(T) catch return vm.err.set(.oom);
+}
+fn pop(vm: *Vm, addr: Memory.Addr) union(enum) {
+    string_literal: Extent,
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    placeholder: i32,
+} {
+    const value_type, const value_addr = vm.readValue(Type, addr);
+    switch (value_type) {
+        .string_literal => {
+            const start, const end_addr = vm.readValue(usize, value_addr);
+            std.debug.assert(end_addr.eql(vm.mem.top()));
+            // TODO: add check that scans to see if anyone is pointing to discarded memory?
+            _ = vm.mem.discardFrom(addr);
+            std.debug.assert(vm.text[start] == '"');
+            const token = lex(vm.text, start);
+            std.debug.assert(token.tag == .string_literal);
+            std.debug.assert(vm.text[token.end - 1] == '"');
+            return .{ .string_literal = token.extent() };
+        },
+        else => @panic("todo"),
+    }
 }
 fn readPointer(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { *T, Memory.Addr } {
     return .{ vm.mem.toPointer(T, addr), vm.mem.after(T, addr) };
@@ -1571,6 +1586,9 @@ const TokenFmt = struct {
     }
 };
 
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// TODO: maybe this should return a struct { Tag, usize } instead?
+//       const tag, const end = lex(text, start) ?
 fn lex(text: []const u8, lex_start: usize) Token {
     const State = union(enum) {
         start,
