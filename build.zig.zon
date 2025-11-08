@@ -1,6 +1,6 @@
 .{
-    .name = .repomod,
-    .fingerprint = 0xcc800d558f9fc91b,
+    .name = .mutiny,
+    .fingerprint = 0x45669a4d9bbfec9f,
     .version = "0.0.1",
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
