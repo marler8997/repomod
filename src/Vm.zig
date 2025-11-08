@@ -2748,9 +2748,10 @@ test "bad code" {
 
 fn testCode(text: []const u8) !void {
     std.debug.print("testing code:\n---\n{s}\n---\n", .{text});
-
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
+    var buffer: [4096]u8 = undefined;
+    std.debug.assert(buffer.len >= std.heap.pageSize());
+    var gpa: std.heap.FixedBufferAllocator = .init(&buffer);
+    defer std.debug.assert(gpa.end_index == 0);
     var vm: Vm = .{
         .mono_funcs = &monomock.funcs,
         .mono_domain = undefined,
