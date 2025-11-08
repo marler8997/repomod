@@ -1,27 +1,21 @@
-const global = struct {
-    // TODO: make this thread-local if we want to support multithreading
-    var active_domain: ?struct {
-        thread_id: std.Thread.Id,
-        domain: *Domain,
-    } = null;
-};
-pub fn setGlobalActiveDomain(domain: *Domain) void {
-    std.debug.assert(global.active_domain == null);
-    global.active_domain = .{
-        .thread_id = std.Thread.getCurrentId(),
-        .domain = domain,
-    };
+threadlocal var thread_local_root_domain: ?*Domain = null;
+
+pub fn setRootDomain(domain: *Domain) void {
+    std.debug.assert(domain.attached_thread == null);
+    std.debug.assert(thread_local_root_domain == null);
+    thread_local_root_domain = domain;
 }
-pub fn unsetGlobalActiveDomain(domain: *Domain) void {
-    std.debug.assert(global.active_domain.?.thread_id == std.Thread.getCurrentId());
-    std.debug.assert(global.active_domain.?.domain == domain);
-    global.active_domain = null;
+pub fn unsetRootDomain(domain: *Domain) void {
+    std.debug.assert(domain.attached_thread == null);
+    std.debug.assert(thread_local_root_domain == domain);
+    thread_local_root_domain = null;
 }
 
 pub const funcs: mono.Funcs = .{
     .get_root_domain = mock_get_root_domain,
     .domain_get = mock_domain_get,
     .thread_attach = mock_thread_attach,
+    .thread_detach = mock_thread_detach,
     .assembly_foreach = mock_assembly_foreach,
     .assembly_get_name = mock_assembly_get_name,
     .assembly_get_image = mock_assembly_get_image,
@@ -40,6 +34,8 @@ pub const funcs: mono.Funcs = .{
 };
 
 pub const Domain = struct {
+    attached_thread: ?MockThread = null,
+
     pub fn deinit(domain: *Domain) void {
         _ = domain;
     }
@@ -50,19 +46,41 @@ pub const Domain = struct {
         return @ptrCast(domain);
     }
 };
+const MockThread = struct {
+    id: std.Thread.Id,
+    domain: *Domain,
+    pub fn fromMono(thread: *const mono.Thread) *const MockThread {
+        return @ptrCast(@alignCast(thread));
+    }
+    pub fn toMono(thread: *const MockThread) *const mono.Thread {
+        return @ptrCast(thread);
+    }
+};
 
 fn mock_get_root_domain() callconv(.c) ?*const mono.Domain {
-    @panic("shouldn't be called");
+    return (thread_local_root_domain orelse return null).toMono();
 }
 fn mock_domain_get() callconv(.c) ?*const mono.Domain {
-    if (global.active_domain) |*active| {
-        std.debug.assert(active.thread_id == std.Thread.getCurrentId());
-        return active.domain.toMono();
-    }
-    return null;
+    const domain = thread_local_root_domain orelse return null;
+    const attached_thread = domain.attached_thread orelse return null;
+    if (attached_thread.id != std.Thread.getCurrentId()) return null;
+    return domain.toMono();
 }
-fn mock_thread_attach(_: ?*const mono.Domain) callconv(.c) ?*const mono.Thread {
-    @panic("shouldn't be called");
+fn mock_thread_attach(d: *const mono.Domain) callconv(.c) ?*const mono.Thread {
+    const domain: *Domain = @constCast(Domain.fromMono(d));
+    std.debug.assert(domain.attached_thread == null);
+    domain.attached_thread = .{ .domain = domain, .id = std.Thread.getCurrentId() };
+    return domain.attached_thread.?.toMono();
+}
+fn mock_thread_detach(t: *const mono.Thread) callconv(.c) void {
+    const domain = blk: {
+        const thread: *const MockThread = .fromMono(t);
+        const domain = thread.domain;
+        std.debug.assert(thread == &thread.domain.attached_thread.?);
+        break :blk domain;
+    };
+    domain.attached_thread.? = undefined;
+    domain.attached_thread = null;
 }
 
 const MockAssembly = struct {

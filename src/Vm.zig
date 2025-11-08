@@ -2716,20 +2716,23 @@ const ErrorFmt = struct {
     }
 };
 
-fn testBadCode(text: []const u8, expected_error: []const u8) !void {
+test {
+    try badCodeTests(&monomock.funcs);
+    try goodCodeTests(&monomock.funcs);
+}
+
+fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: []const u8) !void {
     std.debug.print("testing bad code:\n---\n{s}\n---\n", .{text});
 
-    var domain: monomock.Domain = .{};
-    defer domain.deinit();
-
-    monomock.setGlobalActiveDomain(&domain);
-    defer monomock.unsetGlobalActiveDomain(&domain);
+    var test_domain: TestDomain = undefined;
+    test_domain.init(mono_funcs);
+    defer test_domain.deinit(mono_funcs);
 
     var buffer: [4096 * 2]u8 = undefined;
     std.debug.assert(buffer.len >= std.heap.pageSize());
     var vm_fixed_fba: std.heap.FixedBufferAllocator = .init(&buffer);
     var vm: Vm = .{
-        .mono_funcs = &monomock.funcs,
+        .mono_funcs = mono_funcs,
         .err = undefined,
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
@@ -2749,83 +2752,117 @@ fn testBadCode(text: []const u8, expected_error: []const u8) !void {
     }
 }
 
-test "bad code" {
-    try testBadCode("example_id = @Nothing()", "1: nothing was assigned to identifier 'example_id'");
-    try testBadCode("fn", "1: syntax error: expected an identifier after 'fn' but got EOF");
-    try testBadCode("fn a", "1: syntax error: expected an open paren '(' but got EOF");
-    try testBadCode("fn @Nothing()", "1: syntax error: expected an identifier after 'fn' but got the builtin function '@Nothing'");
-    try testBadCode("fn foo", "1: syntax error: expected an open paren '(' but got EOF");
-    try testBadCode("fn foo \"hello\"", "1: syntax error: expected an open paren '(' but got a string literal \"hello\"");
-    try testBadCode("fn foo )", "1: syntax error: expected an open paren '(' but got a close paren ')'");
-    try testBadCode("foo()", "1: undefined identifier 'foo'");
-    try testBadCode("foo = \"hello\" foo()", "1: can't call a string literal");
-    try testBadCode("@Assembly(\"wontbefound\")", "1: assembly \"wontbefound\" not found");
-    try testBadCode("mscorlib = @Assembly(\"mscorlib\") mscorlib()", "1: can't call an assembly");
-    try testBadCode("fn foo(){}foo.\"wat\"", "1: syntax error: expected an identifier after '.' but got a string literal \"wat\"");
-    try testBadCode("@Nothing().foo", "1: void has no fields");
-    try testBadCode("fn foo(){}foo.wat", "1: a function has no field 'wat'");
-    try testBadCode("@Assembly(\"mscorlib\")()", "1: can't call an assembly");
+fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
+    try testBadCode(mono_funcs, "example_id = @Nothing()", "1: nothing was assigned to identifier 'example_id'");
+    try testBadCode(mono_funcs, "fn", "1: syntax error: expected an identifier after 'fn' but got EOF");
+    try testBadCode(mono_funcs, "fn a", "1: syntax error: expected an open paren '(' but got EOF");
+    try testBadCode(mono_funcs, "fn @Nothing()", "1: syntax error: expected an identifier after 'fn' but got the builtin function '@Nothing'");
+    try testBadCode(mono_funcs, "fn foo", "1: syntax error: expected an open paren '(' but got EOF");
+    try testBadCode(mono_funcs, "fn foo \"hello\"", "1: syntax error: expected an open paren '(' but got a string literal \"hello\"");
+    try testBadCode(mono_funcs, "fn foo )", "1: syntax error: expected an open paren '(' but got a close paren ')'");
+    try testBadCode(mono_funcs, "foo()", "1: undefined identifier 'foo'");
+    try testBadCode(mono_funcs, "foo = \"hello\" foo()", "1: can't call a string literal");
+    try testBadCode(mono_funcs, "@Assembly(\"wontbefound\")", "1: assembly \"wontbefound\" not found");
+    try testBadCode(mono_funcs, "mscorlib = @Assembly(\"mscorlib\") mscorlib()", "1: can't call an assembly");
+    try testBadCode(mono_funcs, "fn foo(){}foo.\"wat\"", "1: syntax error: expected an identifier after '.' but got a string literal \"wat\"");
+    try testBadCode(mono_funcs, "@Nothing().foo", "1: void has no fields");
+    try testBadCode(mono_funcs, "fn foo(){}foo.wat", "1: a function has no field 'wat'");
+    try testBadCode(mono_funcs, "@Assembly(\"mscorlib\")()", "1: can't call an assembly");
     // try testCode("@Class(@Assembly(\"mscorlib\"), \"" ++ ("a" ** (dotnet_max_id)) ++ "\")");
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     // TODO: implement this next
     if (false) try testBadCode(
+        mono_funcs,
         "@IsClass(@Assembly(\"mscorlib\")." ++ ("a" ** (ManagedId.max + 1)) ++ ")",
         "1: id '" ++ ("a" ** (ManagedId.max + 1)) ++ "' is too big (1024 bytes but max is 1023)",
     );
     if (false) try testBadCode(
+        mono_funcs,
         "@IsClass(@Assembly(\"mscorlib\"), \"DoesNot\", \"Exist\")",
         "1: this assembly does not have a class named \"Exist\" in namespace \"DoesNot\"",
     );
-    try testBadCode("999999999999999999999", "1: integer literal '999999999999999999999' doesn't fit in an i64");
-    // try testBadCode("-999999999999999999999", "1: integer literal '-999999999999999999999' doesn't fit in an i64");
+    try testBadCode(mono_funcs, "999999999999999999999", "1: integer literal '999999999999999999999' doesn't fit in an i64");
+    // try testBadCode(mono_funcs, "-999999999999999999999", "1: integer literal '-999999999999999999999' doesn't fit in an i64");
     // const max_fields = 256;
     // try testCode("@Assembly(\"mscorlib\")" ++ (".a" ** max_fields));
-    // try testBadCode("@Assembly(\"mscorlib\")" ++ (".a" ** (max_fields + 1)), "1: too many assembly fields");
+    // try testBadCode(mono_funcs, "@Assembly(\"mscorlib\")" ++ (".a" ** (max_fields + 1)), "1: too many assembly fields");
 
-    try testBadCode("new", "1: syntax error: expected an identifier to follow 'new' but got EOF");
-    try testBadCode("new 0", "1: syntax error: expected an identifier to follow 'new' but got a number literal 0");
-    // try testBadCode("new foo(", "");
-    try testBadCode("new foo()", "1: undefined identifier 'foo'");
-    try testBadCode("foo=0 new foo()", "1: cannot new 'foo' which is an integer");
+    try testBadCode(mono_funcs, "new", "1: syntax error: expected an identifier to follow 'new' but got EOF");
+    try testBadCode(mono_funcs, "new 0", "1: syntax error: expected an identifier to follow 'new' but got a number literal 0");
+    // try testBadCode(mono_funcs, "new foo(", "");
+    try testBadCode(mono_funcs, "new foo()", "1: undefined identifier 'foo'");
+    try testBadCode(mono_funcs, "foo=0 new foo()", "1: cannot new 'foo' which is an integer");
 
-    try testBadCode("0n", "1: invalid integer literal '0n'");
+    try testBadCode(mono_funcs, "0n", "1: invalid integer literal '0n'");
 
-    try testBadCode("fn a(", "1: syntax error: expected an identifier or close paren ')' but got EOF");
-    try testBadCode("fn a(0){}", "1: syntax error: expected an identifier or close paren ')' but got a number literal 0");
-    try testBadCode("fn a(\"hey\"){}", "1: syntax error: expected an identifier or close paren ')' but got a string literal \"hey\"");
+    try testBadCode(mono_funcs, "fn a(", "1: syntax error: expected an identifier or close paren ')' but got EOF");
+    try testBadCode(mono_funcs, "fn a(0){}", "1: syntax error: expected an identifier or close paren ')' but got a number literal 0");
+    try testBadCode(mono_funcs, "fn a(\"hey\"){}", "1: syntax error: expected an identifier or close paren ')' but got a string literal \"hey\"");
 
-    try testBadCode("fn a(){} a(0)", "1: expected 0 args but got 1");
-    try testBadCode("fn a(x){} a()", "1: expected 1 args but got 0");
-    try testBadCode("@Assembly(\"mscorlib\").foo()", "1: can't call fields on an assembly directly, call @Class first");
-    try testBadCode(
+    try testBadCode(mono_funcs, "fn a(){} a(0)", "1: expected 0 args but got 1");
+    try testBadCode(mono_funcs, "fn a(x){} a()", "1: expected 1 args but got 0");
+    try testBadCode(mono_funcs, "@Assembly(\"mscorlib\").foo()", "1: can't call fields on an assembly directly, call @Class first");
+    try testBadCode(mono_funcs,
         \\mscorlib = @Assembly("mscorlib")
         \\Console = @Class(mscorlib.System.Console)
         \\fn foo() {}
         \\Console.Write(foo);
     , "4: can't marshal a function to a managed method");
-    try testBadCode(
+    try testBadCode(mono_funcs,
         \\mscorlib = @Assembly("mscorlib")
         \\Console = @Class(mscorlib.System.Console)
         \\Console.ThisMethodShouldNotExist();
     , "3: method ThisMethodShouldNotExist with 0 params does not exist in this class");
-    try testBadCode("0", "1: return value of type integer was ignored, use @Discard to discard it");
-    try testBadCode("\"hello\"", "1: return value of type string_literal was ignored, use @Discard to discard it");
+    try testBadCode(mono_funcs, "0", "1: return value of type integer was ignored, use @Discard to discard it");
+    try testBadCode(mono_funcs, "\"hello\"", "1: return value of type string_literal was ignored, use @Discard to discard it");
 }
 
-fn testCode(text: []const u8) !void {
-    std.debug.print("testing code:\n---\n{s}\n---\n", .{text});
+const TestDomain = struct {
+    mock_domain: if (is_test) monomock.Domain else void,
+    thread: *const mono.Thread,
+    pub fn init(self: *TestDomain, mono_funcs: *const mono.Funcs) void {
+        std.debug.assert(null == mono_funcs.domain_get());
 
-    var domain: monomock.Domain = .{};
-    defer domain.deinit();
+        if (is_test) {
+            if (mono_funcs == &monomock.funcs) {
+                self.mock_domain = .{};
+                monomock.setRootDomain(&self.mock_domain);
+            }
+        }
 
-    monomock.setGlobalActiveDomain(&domain);
-    defer monomock.unsetGlobalActiveDomain(&domain);
+        const root_domain = mono_funcs.get_root_domain() orelse @panic(
+            "mono_get_root_domain returned null",
+        );
+        self.thread = mono_funcs.thread_attach(root_domain) orelse @panic(
+            "mono_thread_attach failed",
+        );
+
+        // domain_get is how the Vm accesses the domain, make sure it's
+        // what we expect after attaching our thread to it
+        std.debug.assert(mono_funcs.domain_get() == root_domain);
+    }
+    pub fn deinit(self: *TestDomain, mono_funcs: *const mono.Funcs) void {
+        mono_funcs.thread_detach(self.thread);
+        if (is_test) {
+            if (mono_funcs == &monomock.funcs) {
+                monomock.unsetRootDomain(&self.mock_domain);
+                self.mock_domain.deinit();
+            }
+        }
+        self.* = undefined;
+    }
+};
+
+fn testCode(mono_funcs: *const mono.Funcs, text: []const u8) !void {
+    var test_domain: TestDomain = undefined;
+    test_domain.init(mono_funcs);
+    defer test_domain.deinit(mono_funcs);
 
     var buffer: [4096 * 2]u8 = undefined;
     std.debug.assert(buffer.len >= std.heap.pageSize());
     var vm_fixed_fba: std.heap.FixedBufferAllocator = .init(&buffer);
     var vm: Vm = .{
-        .mono_funcs = &monomock.funcs,
+        .mono_funcs = mono_funcs,
         .err = undefined,
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
@@ -2844,36 +2881,36 @@ fn testCode(text: []const u8) !void {
     // try std.testing.expectEqual(0, vm_fixed_fba.end_index);
 }
 
-test {
-    try testCode("fn foo(){}");
-    try testCode("@LogAssemblies()");
-    try testCode("fn foo(){ @LogAssemblies() }");
-    try testCode("fn foo(){ @LogAssemblies() }foo()foo()");
-    try testCode("@Discard(0)");
-    try testCode("@Discard(\"Hello\")");
-    try testCode("@Discard(@Assembly(\"mscorlib\"))");
-    try testCode("@Discard(@Assembly(\"mscorlib\").System)");
-    try testCode(
+fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
+    try testCode(mono_funcs, "fn foo(){}");
+    try testCode(mono_funcs, "@LogAssemblies()");
+    try testCode(mono_funcs, "fn foo(){ @LogAssemblies() }");
+    try testCode(mono_funcs, "fn foo(){ @LogAssemblies() }foo()foo()");
+    try testCode(mono_funcs, "@Discard(0)");
+    try testCode(mono_funcs, "@Discard(\"Hello\")");
+    try testCode(mono_funcs, "@Discard(@Assembly(\"mscorlib\"))");
+    try testCode(mono_funcs, "@Discard(@Assembly(\"mscorlib\").System)");
+    try testCode(mono_funcs,
         \\mscorlib = @Assembly("mscorlib")
         \\@Discard(@Class(mscorlib.System.Object))
     );
-    try testCode("ms = @Assembly(\"mscorlib\")");
-    try testCode("foo_string = \"foo\"");
-    try testCode("fn foo(){}@Discard(foo)");
-    try testCode("fn foo(){}foo()");
-    // try testCode("\"foo\"[0]");
-    // try testCode("@Assembly(\"mscorlib\") =");
-    try testCode("fn foo(x) { }");
-    try testCode("fn foo(x) { }foo(0)");
-    try testCode("fn foo(x,y) { }foo(0,1)");
-    if (false) try testCode(
+    try testCode(mono_funcs, "ms = @Assembly(\"mscorlib\")");
+    try testCode(mono_funcs, "foo_string = \"foo\"");
+    try testCode(mono_funcs, "fn foo(){}@Discard(foo)");
+    try testCode(mono_funcs, "fn foo(){}foo()");
+    // try testCode(mono_funcs, "\"foo\"[0]");
+    // try testCode(mono_funcs, "@Assembly(\"mscorlib\") =");
+    try testCode(mono_funcs, "fn foo(x) { }");
+    try testCode(mono_funcs, "fn foo(x) { }foo(0)");
+    try testCode(mono_funcs, "fn foo(x,y) { }foo(0,1)");
+    if (false) try testCode(mono_funcs,
         \\fn fib(n) {
         \\  if (n <= 1) return n
         \\  return fib(n - 1) + fib(n - 1)
         \\}
         \\fib(10)
     );
-    try testCode(
+    try testCode(mono_funcs,
         \\mscorlib = @Assembly("mscorlib")
         \\Object = @Class(mscorlib.System.Object)
         \\//mscorlib.System.Console.WriteLine()
@@ -2881,7 +2918,7 @@ test {
         \\//example_obj = new Object()
         \\
     );
-    try testCode(
+    try testCode(mono_funcs,
         \\mscorlib = @Assembly("mscorlib")
         \\Console = @Class(mscorlib.System.Console)
         \\Console.Beep()
@@ -2896,7 +2933,9 @@ test {
     );
 }
 
+const is_test = @import("builtin").is_test;
+
 const std = @import("std");
 const mono = @import("mono.zig");
-const monomock = @import("monomock.zig");
+const monomock = if (is_test) @import("monomock.zig") else struct {};
 const Memory = @import("Memory.zig");

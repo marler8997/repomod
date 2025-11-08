@@ -14,7 +14,8 @@ pub const Callback = fn (data: *anyopaque, user_data: ?*anyopaque) callconv(.c) 
 pub const Funcs = struct {
     get_root_domain: *const fn () callconv(.c) ?*const Domain,
     domain_get: *const fn () callconv(.c) ?*const Domain,
-    thread_attach: *const fn (?*const Domain) callconv(.c) ?*const Thread,
+    thread_attach: *const fn (*const Domain) callconv(.c) ?*const Thread,
+    thread_detach: *const fn (*const Thread) callconv(.c) void,
     // domain_assembly_open: *const fn (*const Domain, [*:0]const u8) callconv(.c) ?*const Assembly,
 
     assembly_foreach: *const fn (func: *const Callback, user_data: ?*anyopaque) callconv(.c) void,
@@ -43,6 +44,7 @@ pub const Funcs = struct {
             .get_root_domain = try monoload.get(mod, .get_root_domain, proc_ref),
             .domain_get = try monoload.get(mod, .domain_get, proc_ref),
             .thread_attach = try monoload.get(mod, .thread_attach, proc_ref),
+            .thread_detach = try monoload.get(mod, .thread_detach, proc_ref),
             // .domain_assembly_open = try monoload.get(mod, .domain_assembly_open, proc_ref),
             .assembly_foreach = try monoload.get(mod, .assembly_foreach, proc_ref),
             .assembly_get_name = try monoload.get(mod, .assembly_get_name, proc_ref),
