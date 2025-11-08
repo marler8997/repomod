@@ -17,6 +17,7 @@ pub const funcs: mono.Funcs = .{
     .object_unbox = test_object_unbox,
     .runtime_invoke = test_runtime_invoke,
 };
+
 fn test_get_root_domain() callconv(.c) ?*const mono.Domain {
     return null;
 }
@@ -103,6 +104,12 @@ const assemblies = [_]TestAssembly{
                 .{ .name = "Object", .methods = &[_]TestMethod{
                     .{ .name = ".ctor", .sig = .{
                         .return_type = .{ .kind = .object },
+                        .param_count = 0,
+                    } },
+                } },
+                .{ .name = "Environment", .methods = &[_]TestMethod{
+                    .{ .name = "get_TickCount", .sig = .{
+                        .return_type = .{ .kind = .i4 },
                         .param_count = 0,
                     } },
                 } },

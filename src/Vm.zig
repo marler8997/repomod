@@ -537,9 +537,8 @@ fn evalExprSuffix(
                     },
                     .i4 => {
                         const result = maybe_result orelse return vm.err.set(.{ .not_implemented = "error message for calling managed function with i4 return type that returned null" });
-                        const unboxed: *i32 = @ptrCast(@alignCast(vm.mono_funcs.object_unbox(result)));
-                        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-                        // std.log.info("Unboxed 32-bit return value {} (0x{0x})", .{unboxed.*});
+                        const unboxed: *align(1) i32 = @ptrCast(vm.mono_funcs.object_unbox(result));
+                        std.log.info("Unboxed 32-bit return value {} (0x{0x})", .{unboxed.*});
                         (try vm.push(Type)).* = .integer;
                         (try vm.push(i64)).* = unboxed.*;
                     },
@@ -2749,6 +2748,7 @@ test "bad code" {
 
 fn testCode(text: []const u8) !void {
     std.debug.print("testing code:\n---\n{s}\n---\n", .{text});
+
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     var vm: Vm = .{
@@ -2814,6 +2814,8 @@ test {
         \\Console.Beep()
         \\Console.WriteLine()
         \\//Console.WriteLine("Hello")
+        \\Environment = @Class(mscorlib.System.Environment)
+        \\//Environment.get_TickCount()
         \\
         \\//sys = @Assembly("System")
         \\//Stopwatch = @Class(sys.System.Diagnostics.Stopwatch)
