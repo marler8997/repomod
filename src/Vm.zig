@@ -78,6 +78,29 @@ pub fn deinit(vm: *Vm) void {
     vm.* = undefined;
 }
 
+pub fn verifyStack(vm: *Vm) void {
+    if (vm.symbols.first == null) {
+        std.debug.assert(vm.mem.top().eql(.zero));
+        return;
+    }
+
+    const first_symbol: *Symbol = @fieldParentPtr("list_node", vm.symbols.first.?);
+    var symbol = first_symbol;
+    while (true) {
+        std.debug.print(
+            "symbol '{s}' adddress {f}\n",
+            .{
+                vm.text[symbol.extent.start..symbol.extent.end],
+                symbol.value_addr,
+            },
+        );
+        // TODO: verify the value is valid
+        _, _ = vm.readValue(Type, symbol.value_addr);
+        const next = symbol.list_node.next orelse break;
+        symbol = @fieldParentPtr("list_node", next);
+    }
+}
+
 const ManagedId = struct {
     buf: [max + 1]u8,
     len: std.math.IntFittingRange(0, max),
@@ -104,6 +127,8 @@ const ManagedId = struct {
 };
 
 pub fn evalRoot(vm: *Vm) error{Vm}!void {
+    std.debug.assert(vm.mem.top().eql(.zero));
+
     var offset: usize = 0;
     while (offset < vm.text.len) {
         const after_statement = switch (try vm.evalStatement(offset)) {
@@ -362,9 +387,19 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
         else => {},
     }
 
+    const expr_addr = vm.mem.top();
     const expr_end = try vm.evalExpr(first_token) orelse return .{ .not_statement = first_token };
     const next_token = lex(vm.text, expr_end);
-    if (next_token.tag != .equal) return .{ .statement_end = expr_end };
+    if (next_token.tag != .equal) {
+        if (!vm.mem.top().eql(expr_addr)) {
+            const expr_type, _ = vm.readValue(Type, expr_addr);
+            return vm.err.set(.{ .statement_result_ignored = .{
+                .pos = first_token.start,
+                .ignored_type = expr_type,
+            } });
+        }
+        return .{ .statement_end = expr_end };
+    }
 
     @panic("todo");
 }
@@ -820,7 +855,7 @@ fn evalFnCallArgs(
     vm: *Vm,
     param_count: u16,
     params: union(enum) {
-        builtin: []const Type,
+        builtin: []const BuiltinParamType,
         addr: Memory.Addr,
     },
     start: usize,
@@ -850,17 +885,20 @@ fn evalFnCallArgs(
         const arg_type = vm.mem.toPointer(Type, arg_addr).*;
 
         if (arg_index < param_count) {
-            const param_type = blk: switch (params) {
-                .builtin => |p| break :blk p[arg_index],
+            const maybe_param_type: ?Type = blk: switch (params) {
+                .builtin => |param_types| switch (param_types[arg_index]) {
+                    .anything => null,
+                    .concrete => |t| t,
+                },
                 .addr => {
                     const param_type, next_param_addr = vm.readValue(Type, next_param_addr);
                     break :blk param_type;
                 },
             };
-            if (arg_type != param_type) return vm.err.set(.{ .arg_type = .{
+            if (maybe_param_type) |t| if (t != arg_type) return vm.err.set(.{ .arg_type = .{
                 .arg_pos = first_token.start,
                 .arg_index = arg_index,
-                .expected = param_type,
+                .expected = t,
                 .actual = arg_type,
             } });
         }
@@ -959,51 +997,54 @@ fn evalBuiltin(
             (try vm.push(Type)).* = .class;
             (try vm.push(*const mono.Class)).* = class;
         },
-        // .@"@Class" => {
-        //     const assembly_type, const assembly_addr = vm.readValue(Type, args_addr);
-        //     std.debug.assert(assembly_type == .assembly);
-        //     const assembly, const namespace_type_addr = vm.readValue(*const mono.Assembly, assembly_addr);
-
-        //     const namespace_type, const namespace_token_addr = vm.readValue(Type, namespace_type_addr);
-        //     std.debug.assert(namespace_type == .string_literal);
-        //     const namespace_token_start, const name_type_addr = vm.readValue(usize, namespace_token_addr);
-        //     std.debug.assert(vm.text[namespace_token_start] == '"');
-
-        //     const name_type, const name_token_addr = vm.readValue(Type, name_type_addr);
-        //     std.debug.assert(name_type == .string_literal);
-        //     const name_token_start, const end_addr = vm.readValue(usize, name_token_addr);
-        //     std.debug.assert(vm.text[name_token_start] == '"');
-
-        //     std.debug.assert(end_addr.eql(vm.mem.top()));
-        //     // TODO: add check that scans to see if anyone is pointing to discarded memory?
-        //     _ = vm.mem.discardFrom(args_addr);
-
-        //     const namespace_token = lex(vm.text, namespace_token_start);
-        //     const name_token = lex(vm.text, name_token_start);
-        //     std.debug.assert(namespace_token.tag == .string_literal);
-        //     std.debug.assert(name_token.tag == .string_literal);
-        //     std.debug.assert(vm.text[namespace_token.end - 1] == '"');
-        //     std.debug.assert(vm.text[name_token.end - 1] == '"');
-
-        //     const namespace = try vm.managedId(namespace_token.extentTrimmed());
-        //     const name = try vm.managedId(name_token.extentTrimmed());
-
-        //     const image = vm.mono_funcs.assembly_get_image(assembly) orelse @panic(
-        //         "mono_assembly_get_image returned null",
-        //     );
-        //     const class = vm.mono_funcs.class_from_name(
-        //         image,
-        //         namespace.slice(),
-        //         name.slice(),
-        //     ) orelse return vm.err.set(.{ .missing_class = .{
-        //         .assembly = assembly,
-        //         .namespace = namespace_token.extent(),
-        //         .name = name_token.extent(),
-        //     } });
-        //     (try vm.push(Type)).* = .class;
-        //     (try vm.push(*const mono.Class)).* = class;
-        // },
+        .@"@Discard" => {
+            std.debug.assert(!args_addr.eql(vm.mem.top()));
+            vm.discardTopValue(args_addr);
+        },
     }
+}
+
+fn discardTopValue(vm: *Vm, addr: Memory.Addr) void {
+    const value_type, const value_addr = vm.readValue(Type, addr);
+    const end = blk: switch (value_type) {
+        .integer => {
+            _, const end = vm.readPointer(i64, value_addr);
+            break :blk end;
+        },
+        .string_literal => {
+            _, const end = vm.readPointer(usize, value_addr);
+            break :blk end;
+        },
+        .function => {
+            _, const end = vm.readPointer(Memory.Addr, value_addr);
+            break :blk end;
+        },
+        .assembly => {
+            _, const end = vm.readPointer(*const mono.Assembly, value_addr);
+            break :blk end;
+        },
+        .assembly_field => {
+            _, const id_start_addr = vm.readPointer(*const mono.Assembly, value_addr);
+            _, const end = vm.readPointer(usize, id_start_addr);
+            break :blk end;
+        },
+        .class => {
+            _, const end = vm.readPointer(*const mono.Class, value_addr);
+            break :blk end;
+        },
+        .class_member => {
+            _, const id_start_addr = vm.readPointer(*const mono.Class, value_addr);
+            _, const end = vm.readPointer(usize, id_start_addr);
+            break :blk end;
+        },
+        .object => {
+            _, const end = vm.readPointer(*const mono.Object, value_addr);
+            break :blk end;
+        },
+    };
+    std.debug.assert(end.eql(vm.mem.top()));
+    // TODO: add check that scans to see if anyone is pointing to discarded memory?
+    _ = vm.mem.discardFrom(addr);
 }
 
 const DottedIterator = struct {
@@ -1274,6 +1315,11 @@ fn logAssemblies(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.
     std.log.info("  assembly[{}] name='{s}'", .{ ctx.index, std.mem.span(str) });
 }
 
+const BuiltinParamType = union(enum) {
+    anything,
+    concrete: Type,
+};
+
 const Builtin = enum {
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     // temporary builtin, remove this later
@@ -1281,12 +1327,14 @@ const Builtin = enum {
     @"@LogAssemblies",
     @"@Assembly",
     @"@Class",
-    pub fn params(builtin: Builtin) []const Type {
+    @"@Discard",
+    pub fn params(builtin: Builtin) []const BuiltinParamType {
         return switch (builtin) {
             .@"@Nothing" => &.{},
             .@"@LogAssemblies" => &.{},
-            .@"@Assembly" => &.{.string_literal},
-            .@"@Class" => &.{.assembly_field},
+            .@"@Assembly" => &.{.{ .concrete = .string_literal }},
+            .@"@Class" => &.{.{ .concrete = .assembly_field }},
+            .@"@Discard" => &.{.anything},
         };
     }
     pub fn paramCount(builtin: Builtin) u16 {
@@ -1300,6 +1348,7 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@LogAssemblies", .@"@LogAssemblies" },
     .{ "@Assembly", .@"@Assembly" },
     .{ "@Class", .@"@Class" },
+    .{ "@Discard", .@"@Discard" },
 });
 // pub const builtin_symbols = std.StaticStringMap(Value).initComptime(.{
 //     // .{ "void", .{ .type =  },
@@ -2465,6 +2514,10 @@ pub const Error = union(enum) {
             @"an assembly",
         },
     },
+    statement_result_ignored: struct {
+        pos: usize,
+        ignored_type: Type,
+    },
     // an identifier was assigned a void value
     void_assignment: struct {
         id_extent: Extent,
@@ -2595,6 +2648,10 @@ const ErrorFmt = struct {
                     @tagName(n.value),
                 },
             ),
+            .statement_result_ignored => |i| try writer.print(
+                "{d}: return value of type {t} was ignored, use @Discard to discard it",
+                .{ getLineNum(f.text, i.pos), i.ignored_type },
+            ),
             .void_assignment => |v| try writer.print(
                 "{d}: nothing was assigned to identifier '{s}'",
                 .{
@@ -2662,16 +2719,18 @@ const ErrorFmt = struct {
 
 fn testBadCode(text: []const u8, expected_error: []const u8) !void {
     std.debug.print("testing bad code:\n---\n{s}\n---\n", .{text});
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
+    var buffer: [4096 * 2]u8 = undefined;
+    std.debug.assert(buffer.len >= std.heap.pageSize());
+    var vm_fixed_fba: std.heap.FixedBufferAllocator = .init(&buffer);
     var vm: Vm = .{
         .mono_funcs = &monomock.funcs,
         .mono_domain = undefined,
         .err = undefined,
         .text = text,
-        .mem = .{ .allocator = gpa.allocator() },
+        .mem = .{ .allocator = vm_fixed_fba.allocator() },
         .symbols = .{},
     };
+    vm.verifyStack();
     defer vm.deinit();
     if (vm.evalRoot()) {
         return error.TestUnexpectedSuccess;
@@ -2744,14 +2803,15 @@ test "bad code" {
         \\Console = @Class(mscorlib.System.Console)
         \\Console.ThisMethodShouldNotExist();
     , "3: method ThisMethodShouldNotExist with 0 params does not exist in this class");
+    try testBadCode("0", "1: return value of type integer was ignored, use @Discard to discard it");
+    try testBadCode("\"hello\"", "1: return value of type string_literal was ignored, use @Discard to discard it");
 }
 
 fn testCode(text: []const u8) !void {
     std.debug.print("testing code:\n---\n{s}\n---\n", .{text});
-    var buffer: [4096]u8 = undefined;
+    var buffer: [4096 * 2]u8 = undefined;
     std.debug.assert(buffer.len >= std.heap.pageSize());
     var vm_fixed_fba: std.heap.FixedBufferAllocator = .init(&buffer);
-    defer std.debug.assert(vm_fixed_fba.end_index == 0);
     var vm: Vm = .{
         .mono_funcs = &monomock.funcs,
         .mono_domain = undefined,
@@ -2760,7 +2820,7 @@ fn testCode(text: []const u8) !void {
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
         .symbols = .{},
     };
-    defer vm.deinit();
+    vm.verifyStack();
     vm.evalRoot() catch {
         std.debug.print(
             "Failed to interpret the following code:\n---\n{s}\n---\nerror: {f}\n",
@@ -2768,6 +2828,9 @@ fn testCode(text: []const u8) !void {
         );
         return error.VmError;
     };
+    vm.verifyStack();
+    vm.deinit();
+    // try std.testing.expectEqual(0, vm_fixed_fba.end_index);
 }
 
 test {
@@ -2775,20 +2838,20 @@ test {
     try testCode("@LogAssemblies()");
     try testCode("fn foo(){ @LogAssemblies() }");
     try testCode("fn foo(){ @LogAssemblies() }foo()foo()");
-    try testCode("@Assembly(\"mscorlib\")");
+    try testCode("@Discard(0)");
+    try testCode("@Discard(\"Hello\")");
+    try testCode("@Discard(@Assembly(\"mscorlib\"))");
+    try testCode("@Discard(@Assembly(\"mscorlib\").System)");
+    try testCode(
+        \\mscorlib = @Assembly("mscorlib")
+        \\@Discard(@Class(mscorlib.System.Object))
+    );
     try testCode("ms = @Assembly(\"mscorlib\")");
-    try testCode("\"foo\"");
     try testCode("foo_string = \"foo\"");
-    try testCode("fn foo(){}foo");
+    try testCode("fn foo(){}@Discard(foo)");
     try testCode("fn foo(){}foo()");
     // try testCode("\"foo\"[0]");
-    // try testCode(".foo");
     // try testCode("@Assembly(\"mscorlib\") =");
-    // try testCode("fn foo(){}foo.bar");
-
-    // try testCode("@Assembly(\"mscorlib\").Class");
-
-    // try testCode("@Assembly(\"mscorlib\").System.Console()");
     try testCode("fn foo(x) { }");
     try testCode("fn foo(x) { }foo(0)");
     try testCode("fn foo(x,y) { }foo(0,1)");
@@ -2799,7 +2862,6 @@ test {
         \\}
         \\fib(10)
     );
-
     try testCode(
         \\mscorlib = @Assembly("mscorlib")
         \\Object = @Class(mscorlib.System.Object)
@@ -2808,7 +2870,6 @@ test {
         \\//example_obj = new Object()
         \\
     );
-
     try testCode(
         \\mscorlib = @Assembly("mscorlib")
         \\Console = @Class(mscorlib.System.Console)

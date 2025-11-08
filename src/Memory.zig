@@ -4,14 +4,10 @@ allocator: Allocator,
 chunks: std.DoublyLinkedList = .{},
 
 pub fn deinit(mem: *Memory) void {
-    var it = mem.chunks.last;
-    while (it) |node| {
-        // save this before freeing the chunk
-        const prev = node.prev;
-        const chunk: *Chunk = @fieldParentPtr("list_node", node);
-        mem.allocator.free(chunk.getAllocation());
-        it = prev;
-    }
+    // std.debug.print("Memory deinit: enter\n", .{});
+    const released = mem.discardFrom(.zero);
+    _ = released;
+    // std.debug.print("Memory deinit: released {} bytes\n", .{released});
     mem.* = undefined;
 }
 
@@ -29,6 +25,9 @@ const Chunk = struct {
 pub const Addr = struct {
     node: ?*std.DoublyLinkedList.Node,
     offset: usize,
+
+    pub const zero: Addr = .{ .node = null, .offset = 0 };
+
     pub fn format(addr: Addr, writer: *std.Io.Writer) error{WriteFailed}!void {
         if (addr.node) |node| {
             std.debug.assert(addr.offset >= chunk_metadata_size);
@@ -73,12 +72,11 @@ pub const Addr = struct {
 };
 
 pub fn top(mem: *Memory) Addr {
-    if (mem.chunks.last) |last_node| {
-        const chunk: *Chunk = @fieldParentPtr("list_node", last_node);
-        return .{ .node = last_node, .offset = chunk.total_used };
-    }
-    return .{ .node = null, .offset = 0 };
+    const last_node = mem.chunks.last orelse return .zero;
+    const chunk: *Chunk = @fieldParentPtr("list_node", last_node);
+    return .{ .node = last_node, .offset = chunk.total_used };
 }
+
 pub fn discardFrom(mem: *Memory, addr: Addr) usize {
     var total_discarded: usize = 0;
     const addr_node = addr.node orelse {
@@ -91,6 +89,8 @@ pub fn discardFrom(mem: *Memory, addr: Addr) usize {
             const chunk: *Chunk = @fieldParentPtr("list_node", node);
             std.debug.assert(chunk.total_used >= chunk_metadata_size);
             total_discarded += chunk.total_used - chunk_metadata_size;
+            // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            // std.debug.print("Memory: free chunk 0x{x}\n", .{@intFromPtr(chunk)});
             mem.allocator.free(chunk.getAllocation());
             it = prev;
         }
@@ -302,8 +302,7 @@ test "Memory toPointer all cases" {
     var mem = Memory{ .allocator = allocator };
     defer mem.deinit();
 
-    const zero_addr = Addr{ .node = null, .offset = 0 };
-    try testing.expectEqual(zero_addr, mem.top());
+    try testing.expectEqual(Addr.zero, mem.top());
 
     // Case 1: null node with offset 0 - should point to first item in first chunk
     const ptr1 = try mem.push(u32);
@@ -314,13 +313,13 @@ test "Memory toPointer all cases" {
         .offset = chunk_metadata_size + std.mem.alignForward(usize, @sizeOf(u32), alignment),
     }, mem.top());
 
-    const null_ptr = mem.toPointer(u32, zero_addr);
+    const null_ptr = mem.toPointer(u32, .zero);
     try testing.expectEqual(@as(u32, 42), null_ptr.*);
     try testing.expectEqual(ptr1, null_ptr);
     try testing.expectEqual(Addr{
         .node = mem.chunks.first,
         .offset = chunk_metadata_size + std.mem.alignForward(usize, @sizeOf(u32), alignment),
-    }, mem.after(u32, zero_addr));
+    }, mem.after(u32, .zero));
 
     // Case 2: normal address within a chunk
     const ptr2 = try mem.push(u64);
