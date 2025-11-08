@@ -442,7 +442,6 @@ fn updateMods(
                     .text = state.text,
                     .err = undefined,
                     .mem = .{ .allocator = scratch },
-                    .symbols = .{},
                 };
                 defer vm.deinit();
                 vm.evalRoot() catch {
