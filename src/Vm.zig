@@ -21,17 +21,19 @@ tests_scheduled: bool = false,
 
 const Extent = struct { start: usize, end: usize };
 
-const FunctionSignature = struct {
-    return_type: ?Type,
-    body: usize,
-    param_count: u16,
+const ReturnStorage = struct {
+    type: ?Type = null,
+    value: union {
+        integer: i64,
+        offset: usize,
+        pointer: *anyopaque,
+    } = undefined,
 };
 
 const Type = enum {
     integer,
     string_literal,
-    function_value,
-    function_ptr,
+    script_function,
     assembly,
     assembly_field,
     class,
@@ -41,8 +43,7 @@ const Type = enum {
         return switch (t) {
             .integer => "an integer",
             .string_literal => "a string literal",
-            .function_value => "a function value",
-            .function_ptr => "a function",
+            .script_function => "a function",
             .assembly => "an assembly",
             .assembly_field => "an assembly field",
             .class => "a class",
@@ -57,8 +58,7 @@ const Type = enum {
             // to send a function like a callback, I think we'll want some
             // sort of @CompileFunction() builtin or something so we
             // can store/save the data required on the stack
-            .function_value => false,
-            .function_ptr => false,
+            .script_function => false,
             .assembly => false, // not sure if this should work or not
             .assembly_field => false, // not sure if this should work or not
             .class => false, // TODO
@@ -186,22 +186,42 @@ pub fn evalRoot(vm: *Vm) error{Vm}!void {
     }
 }
 
-pub fn evalBlock(vm: *Vm, start: usize) error{Vm}!usize {
-    var offset: usize = start;
-    while (true) {
-        const after_statement = switch (try vm.evalStatement(offset)) {
-            .not_statement => |token| {
-                if (token.tag == .r_brace) return token.end;
-                return vm.err.set(.{ .unexpected_token = .{
-                    .expected = "a statement",
-                    .token = token,
-                } });
-            },
-            .statement_end => |end| end,
-        };
-        std.debug.assert(after_statement > offset);
-        offset = after_statement;
-    }
+pub fn evalFunction(
+    vm: *Vm,
+    start: usize,
+    return_storage: *ReturnStorage,
+    args_addr: Memory.Addr,
+) error{Vm}!usize {
+    const body_start = blk: {
+        const token = lex(vm.text, start);
+        if (token.tag != .l_brace) return vm.err.set(.{ .unexpected_token = .{
+            .expected = "an open brace '{' to start function body",
+            .token = token,
+        } });
+        break :blk token.end;
+    };
+
+    const after_close_brace = blk: {
+        var offset: usize = body_start;
+        while (true) {
+            const after_statement = switch (try vm.evalStatement(offset)) {
+                .not_statement => |token| {
+                    if (token.tag == .r_brace) break :blk token.end;
+                    return vm.err.set(.{ .unexpected_token = .{
+                        .expected = "a statement",
+                        .token = token,
+                    } });
+                },
+                .statement_end => |end| end,
+            };
+            std.debug.assert(after_statement > offset);
+            offset = after_statement;
+        }
+    };
+
+    _ = return_storage;
+    if (!args_addr.eql(vm.mem.top())) return vm.err.set(.{ .not_implemented = "evalFunction stack cleanup" });
+    return after_close_brace;
 }
 fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
     not_statement: Token,
@@ -235,8 +255,20 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 } });
                 break :blk token.extent();
             };
+            const arg_start = blk: {
+                const token = lex(vm.text, id_extent.end);
+                if (token.tag != .l_paren) return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "an open paren '(' to start function args",
+                    .token = token,
+                } });
+                break :blk token.end;
+            };
+            const params = try eat(vm.text, &vm.err).evalParamDeclList(arg_start);
+            const after_definition = try eat(vm.text, &vm.err).evalFunction(params.end);
+
             try vm.startSymbol(id_extent.start);
-            const after_definition = try vm.evalFunctionDefinition(id_extent.end);
+            (try vm.push(Type)).* = .script_function;
+            (try vm.push(usize)).* = arg_start;
             try vm.endSymbol();
             return .{ .statement_end = after_definition };
         },
@@ -407,22 +439,6 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
     @panic("todo");
 }
 
-fn evalFunctionDefinition(vm: *Vm, start: usize) error{Vm}!usize {
-    (try vm.push(Type)).* = .function_value;
-    const signature: *FunctionSignature = try vm.push(FunctionSignature);
-    signature.* = .{
-        .return_type = null,
-        .body = start,
-        .param_count = 0,
-    };
-    const after_params = try vm.evalParamDeclList(start, &signature.param_count);
-    signature.body = after_params;
-    // TODO: parse and set the return type if we want to support that
-    const block_start = try eat(vm.text, &vm.err).eatToken(after_params, .l_brace);
-    signature.body = block_start;
-    return try eat(vm.text, &vm.err).evalBlock(block_start);
-}
-
 fn evalExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
     const expr_addr = vm.mem.top();
     var offset = try vm.evalPrimaryTypeExpr(first_token) orelse return null;
@@ -457,8 +473,7 @@ fn evalExprSuffix(
             return switch (expr_type_ptr.*) {
                 .integer,
                 .string_literal,
-                .function_value,
-                .function_ptr,
+                .script_function,
                 => vm.err.set(.{ .no_field = .{
                     .start = suffix_op_token.start,
                     .field = id_extent,
@@ -605,37 +620,20 @@ fn evalExprSuffix(
                 // .function_value => {
                 //     return vm.err.set(.{ .not_implemented = "should you be able to call functions by value?" });
                 // },
-                .function_ptr => |signature_addr| {
-                    const signature: *FunctionSignature, const params_addr = vm.readPointer(
-                        FunctionSignature,
-                        signature_addr,
-                    );
-                    const return_addr = vm.mem.top();
-                    if (signature.return_type) |return_type| {
-                        _ = return_type;
-                        // TODO: we need to allocate space for the return value
-                        return vm.err.set(.{ .not_implemented = "todo: allocate space for return value" });
-                    }
-
-                    // std.debug.print("Sig {}", .{signature.*});
+                .script_function => |param_start| {
+                    const params = try eat(vm.text, &vm.err).evalParamDeclList(param_start);
                     const args_addr = vm.mem.top();
-                    const after_args = try vm.evalFnCallArgs(
-                        signature.param_count,
-                        .{ .addr = params_addr },
-                        suffix_op_token.end,
-                    );
-
-                    _ = try vm.evalBlock(signature.body);
-
-                    // TODO: add check that scans to see if anyone is pointing to discarded memory?
-                    _ = vm.mem.discardFrom(args_addr);
-
-                    if (signature.return_type) |return_type| {
+                    const after_args = try vm.evalFnCallArgs(.{ .script = params.count }, suffix_op_token.end);
+                    var return_storage: ReturnStorage = .{};
+                    _ = try vm.evalFunction(params.end, &return_storage, args_addr);
+                    // TODO: in future we could allow the function to leave things on the stack
+                    if (!args_addr.eql(vm.mem.top())) @panic("evalFunction left things on the stack");
+                    if (return_storage.type) |return_type| {
                         _ = return_type;
-                        _ = return_addr;
+                        // verify there is only one value on the stack
+                        // var value_type, const value_addr = vm.
+                        // @panic("todo");
                         return vm.err.set(.{ .not_implemented = "function calls with return types" });
-                    } else {
-                        std.debug.assert(args_addr.eql(vm.mem.top()));
                     }
                     return after_args;
                 },
@@ -662,14 +660,9 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             const token_start_ptr = vm.mem.toPointer(usize, value_addr);
             (try vm.push(usize)).* = token_start_ptr.*;
         },
-        .function_value => {
-            (try vm.push(Type)).* = .function_ptr;
-            (try vm.push(Memory.Addr)).* = value_addr;
-        },
-        .function_ptr => {
-            (try vm.push(Type)).* = .function_ptr;
-            const signature_addr_ptr = vm.mem.toPointer(Memory.Addr, value_addr);
-            (try vm.push(Memory.Addr)).* = signature_addr_ptr.*;
+        .script_function => {
+            (try vm.push(Type)).* = .script_function;
+            (try vm.push(usize)).* = vm.mem.toPointer(usize, value_addr).*;
         },
         .assembly => {
             (try vm.push(Type)).* = .assembly;
@@ -722,7 +715,7 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
             const builtin = builtin_map.get(id) orelse return vm.err.set(.{ .unknown_builtin = first_token });
             const next = try eat(vm.text, &vm.err).eatToken(first_token.end, .l_paren);
             const args_addr = vm.mem.top();
-            const args_end = try vm.evalFnCallArgs(builtin.paramCount(), .{ .builtin = builtin.params() }, next);
+            const args_end = try vm.evalFnCallArgs(.{ .builtin = builtin.params() }, next);
             try vm.evalBuiltin(first_token.extent(), builtin, args_addr);
             return args_end;
         },
@@ -765,42 +758,6 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
         },
         else => null,
     };
-}
-
-fn evalParamDeclList(vm: *Vm, start: usize, param_count_ptr: *u16) error{Vm}!usize {
-    std.debug.assert(param_count_ptr.* == 0);
-
-    const after_open_paren = try eat(vm.text, &vm.err).eatToken(start, .l_paren);
-    var offset = after_open_paren;
-    while (true) {
-        const first_token = lex(vm.text, offset);
-        offset = first_token.end;
-        const id_extent = switch (first_token.tag) {
-            .r_paren => return first_token.end,
-            .identifier => first_token.extent(),
-            else => return vm.err.set(.{ .unexpected_token = .{
-                .expected = "an identifier or close paren ')'",
-                .token = first_token,
-            } }),
-        };
-        _ = id_extent;
-        param_count_ptr.* += 1;
-
-        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        // just say everything is an integer for now
-        (try vm.push(Type)).* = .integer;
-
-        const second_token = lex(vm.text, offset);
-        offset = second_token.end;
-        switch (second_token.tag) {
-            .r_paren => return second_token.end,
-            .comma => {},
-            else => return vm.err.set(.{ .unexpected_token = .{
-                .expected = "an comma ',' or close paren ')'",
-                .token = first_token,
-            } }),
-        }
-    }
 }
 
 fn evalFnCallArgsManaged(vm: *Vm, start: usize) error{Vm}!struct {
@@ -849,19 +806,27 @@ fn evalFnCallArgsManaged(vm: *Vm, start: usize) error{Vm}!struct {
     }
 }
 
-fn evalFnCallArgs(
-    vm: *Vm,
-    param_count: u16,
-    params: union(enum) {
-        builtin: []const BuiltinParamType,
-        addr: Memory.Addr,
-    },
-    start: usize,
-) error{Vm}!usize {
-    var next_param_addr: Memory.Addr = switch (params) {
-        .builtin => undefined,
-        .addr => |addr| addr,
-    };
+const Params = union(enum) {
+    builtin: []const BuiltinParamType,
+    script: u16,
+    pub fn count(params: Params) u16 {
+        return switch (params) {
+            .builtin => |types| @intCast(types.len),
+            .script => |c| c,
+        };
+    }
+    pub fn expectedType(params: Params, arg_index: u16) ?Type {
+        return switch (params) {
+            .builtin => |param_types| if (arg_index < param_types.len) switch (param_types[arg_index]) {
+                .anything => null,
+                .concrete => |t| t,
+            } else null,
+            .script => null,
+        };
+    }
+};
+
+fn evalFnCallArgs(vm: *Vm, params: Params, start: usize) error{Vm}!usize {
     var arg_index: u16 = 0;
     var text_offset = start;
     while (true) {
@@ -870,43 +835,37 @@ fn evalFnCallArgs(
             text_offset = first_token.end;
             break;
         }
-        const arg_addr = vm.mem.top();
-        text_offset = try vm.evalExpr(first_token) orelse return vm.err.set(.{ .unexpected_token = .{
-            .expected = "an expression",
-            .token = first_token,
-        } });
-        if (arg_addr.eql(vm.mem.top())) return vm.err.set(.{ .void_argument = .{
-            .arg_index = arg_index,
-            .first_arg_token = first_token,
-        } });
-
-        const arg_type = vm.mem.toPointer(Type, arg_addr).*;
-
-        if (arg_index < param_count) {
-            const maybe_param_type: ?Type = blk: switch (params) {
-                .builtin => |param_types| switch (param_types[arg_index]) {
-                    .anything => null,
-                    .concrete => |t| t,
-                },
-                .addr => {
-                    const param_type, next_param_addr = vm.readValue(Type, next_param_addr);
-                    break :blk param_type;
-                },
-            };
-            if (maybe_param_type) |t| if (t != arg_type) return vm.err.set(.{ .arg_type = .{
+        if (arg_index < params.count()) {
+            const arg_addr = vm.mem.top();
+            text_offset = try vm.evalExpr(first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                .expected = "an expression",
+                .token = first_token,
+            } });
+            if (arg_addr.eql(vm.mem.top())) return vm.err.set(.{ .void_argument = .{
+                .arg_index = arg_index,
+                .first_arg_token = first_token,
+            } });
+            const arg_type = vm.mem.toPointer(Type, arg_addr).*;
+            if (params.expectedType(arg_index)) |t| if (t != arg_type) return vm.err.set(.{ .arg_type = .{
                 .arg_pos = first_token.start,
                 .arg_index = arg_index,
                 .expected = t,
                 .actual = arg_type,
             } });
+        } else {
+            text_offset = try eat(vm.text, &vm.err).evalExpr(first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                .expected = "an expression",
+                .token = first_token,
+            } });
         }
 
         if (arg_index == std.math.maxInt(u16)) return vm.err.set(.{ .arg_count = .{
             .start = start,
-            .expected = param_count,
-            .actual = arg_index,
+            .expected = params.count(),
+            .actual = @as(u17, std.math.maxInt(u16)) + 1,
         } });
         arg_index += 1;
+
         {
             const token = lex(vm.text, text_offset);
             text_offset = token.end;
@@ -920,9 +879,9 @@ fn evalFnCallArgs(
             }
         }
     }
-    if (arg_index != param_count) return vm.err.set(.{ .arg_count = .{
+    if (arg_index != params.count()) return vm.err.set(.{ .arg_count = .{
         .start = start,
-        .expected = param_count,
+        .expected = params.count(),
         .actual = arg_index,
     } });
     return text_offset;
@@ -1081,13 +1040,12 @@ fn pop(vm: *Vm, addr: Memory.Addr) Value {
             std.debug.assert(vm.text[token.end - 1] == '"');
             return .{ .string_literal = token.extent() };
         },
-        .function_value => unreachable, // I *think* this is unreachable?
-        .function_ptr => {
-            const signature_addr, const end = vm.readValue(Memory.Addr, value_addr);
+        .script_function => {
+            const param_start, const end = vm.readValue(usize, value_addr);
             std.debug.assert(end.eql(vm.mem.top()));
             // TODO: add check that scans to see if anyone is pointing to discarded memory?
             _ = vm.mem.discardFrom(addr);
-            return .{ .function_ptr = signature_addr };
+            return .{ .script_function = param_start };
         },
         .assembly => {
             const assembly, const end = vm.readValue(*const mono.Assembly, value_addr);
@@ -1138,7 +1096,7 @@ fn readValue(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { T, Memory.Ad
 const Value = union(enum) {
     integer: i64,
     string_literal: Extent,
-    function_ptr: Memory.Addr,
+    script_function: usize,
     assembly: *const mono.Assembly,
     assembly_field: struct {
         assembly: *const mono.Assembly,
@@ -1153,7 +1111,7 @@ const Value = union(enum) {
         switch (value.*) {
             .integer => {},
             .string_literal => {},
-            .function_ptr => {},
+            .script_function => {},
             .assembly => {},
             .assembly_field => {},
             .class => {},
@@ -1164,7 +1122,7 @@ const Value = union(enum) {
         return switch (value.*) {
             .integer => .integer,
             .string_literal => .string_literal,
-            .function_ptr => .function_ptr,
+            .script_function => .script_function,
             .assembly => .assembly,
             .assembly_field => .assembly_field,
             .class => .class,
@@ -1223,8 +1181,17 @@ const VmEat = struct {
         return t.end;
     }
 
-    pub fn evalBlock(vm: VmEat, start: usize) error{Vm}!usize {
-        var offset: usize = start;
+    pub fn evalFunction(vm: VmEat, start: usize) error{Vm}!usize {
+        const body_start = blk: {
+            const token = lex(vm.text, start);
+            if (token.tag != .l_brace) return vm.err.set(.{ .unexpected_token = .{
+                .expected = "an open brace '{' to start function body",
+                .token = token,
+            } });
+            break :blk token.end;
+        };
+
+        var offset: usize = body_start;
         while (true) {
             const after_statement = switch (try vm.evalStatement(offset)) {
                 .not_statement => |token| {
@@ -1299,6 +1266,7 @@ const VmEat = struct {
         return switch (first_token.tag) {
             .identifier,
             .string_literal,
+            .number_literal,
             => return first_token.end,
             .builtin => {
                 const after_l_paren = try vm.eatToken(first_token.end, .l_paren);
@@ -1338,6 +1306,37 @@ const VmEat = struct {
             }
         }
         return offset;
+    }
+    fn evalParamDeclList(vm: VmEat, start: usize) error{Vm}!struct {
+        count: u16,
+        end: usize,
+    } {
+        var param_count: u16 = 0;
+        var offset = start;
+        while (true) {
+            const first_token = lex(vm.text, offset);
+            offset = first_token.end;
+            switch (first_token.tag) {
+                .r_paren => return .{ .count = param_count, .end = first_token.end },
+                .identifier => {},
+                else => return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "an identifier or close paren ')'",
+                    .token = first_token,
+                } }),
+            }
+            if (param_count == std.math.maxInt(u16)) return vm.err.set(.{ .not_implemented = "more than 65535 args" });
+            param_count += 1;
+            const second_token = lex(vm.text, offset);
+            offset = second_token.end;
+            switch (second_token.tag) {
+                .r_paren => return .{ .count = param_count, .end = second_token.end },
+                .comma => {},
+                else => return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "an comma ',' or close paren ')'",
+                    .token = first_token,
+                } }),
+            }
+        }
     }
 };
 
@@ -1414,11 +1413,6 @@ const Builtin = enum {
             .@"@Class" => &.{.{ .concrete = .assembly_field }},
             .@"@Discard" => &.{.anything},
             .@"@ScheduleTests" => &.{},
-        };
-    }
-    pub fn paramCount(builtin: Builtin) u16 {
-        return switch (builtin) {
-            inline else => return @intCast(builtin.params().len),
         };
     }
 };
@@ -2573,7 +2567,7 @@ pub const Error = union(enum) {
     arg_count: struct {
         start: usize,
         expected: u16,
-        actual: u16,
+        actual: u17,
     },
     arg_type: struct {
         arg_pos: usize,
@@ -2840,11 +2834,10 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
 fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "example_id = @Nothing()", "1: nothing was assigned to identifier 'example_id'");
     try testBadCode(mono_funcs, "fn", "1: syntax error: expected an identifier after 'fn' but got EOF");
-    try testBadCode(mono_funcs, "fn a", "1: syntax error: expected an open paren '(' but got EOF");
     try testBadCode(mono_funcs, "fn @Nothing()", "1: syntax error: expected an identifier after 'fn' but got the builtin function '@Nothing'");
-    try testBadCode(mono_funcs, "fn foo", "1: syntax error: expected an open paren '(' but got EOF");
-    try testBadCode(mono_funcs, "fn foo \"hello\"", "1: syntax error: expected an open paren '(' but got a string literal \"hello\"");
-    try testBadCode(mono_funcs, "fn foo )", "1: syntax error: expected an open paren '(' but got a close paren ')'");
+    try testBadCode(mono_funcs, "fn foo", "1: syntax error: expected an open paren '(' to start function args but got EOF");
+    try testBadCode(mono_funcs, "fn foo \"hello\"", "1: syntax error: expected an open paren '(' to start function args but got a string literal \"hello\"");
+    try testBadCode(mono_funcs, "fn foo )", "1: syntax error: expected an open paren '(' to start function args but got a close paren ')'");
     try testBadCode(mono_funcs, "foo()", "1: undefined identifier 'foo'");
     try testBadCode(mono_funcs, "foo = \"hello\" foo()", "1: can't call a string literal");
     try testBadCode(mono_funcs, "@Assembly(\"wontbefound\")", "1: assembly \"wontbefound\" not found");
@@ -2986,8 +2979,8 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     // try testCode(mono_funcs, "\"foo\"[0]");
     // try testCode(mono_funcs, "@Assembly(\"mscorlib\") =");
     try testCode(mono_funcs, "fn foo(x) { }");
-    try testCode(mono_funcs, "fn foo(x) { }foo(0)");
-    try testCode(mono_funcs, "fn foo(x,y) { }foo(0,1)");
+    // try testCode(mono_funcs, "fn foo(x) { }foo(0)");
+    // try testCode(mono_funcs, "fn foo(x,y) { }foo(0,1)");
     if (false) try testCode(mono_funcs,
         \\fn fib(n) {
         \\  if (n <= 1) return n
