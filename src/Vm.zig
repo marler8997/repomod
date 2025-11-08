@@ -535,7 +535,18 @@ fn evalExprSuffix(
                     .void => if (maybe_result) |_| {
                         return vm.err.set(.{ .not_implemented = "error message for calling managed function with void return type that returned something" });
                     },
-                    else => return vm.err.set(.{ .not_implemented = "managed return value of this type" }),
+                    .i4 => {
+                        const result = maybe_result orelse return vm.err.set(.{ .not_implemented = "error message for calling managed function with i4 return type that returned null" });
+                        const unboxed: *i32 = @ptrCast(@alignCast(vm.mono_funcs.object_unbox(result)));
+                        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                        // std.log.info("Unboxed 32-bit return value {} (0x{0x})", .{unboxed.*});
+                        (try vm.push(Type)).* = .integer;
+                        (try vm.push(i64)).* = unboxed.*;
+                    },
+                    else => |kind| {
+                        std.debug.print("ReturnTypeKind={t}\n", .{kind});
+                        return vm.err.set(.{ .not_implemented = "managed return value of this type" });
+                    },
                 }
                 return args.end;
             } else if (expr_type == .function) {

@@ -14,6 +14,7 @@ pub const funcs: mono.Funcs = .{
     .signature_get_params = test_signature_get_params,
     .type_get_type = test_type_get_type,
     .object_new = test_object_new,
+    .object_unbox = test_object_unbox,
     .runtime_invoke = test_runtime_invoke,
 };
 fn test_get_root_domain() callconv(.c) ?*const mono.Domain {
@@ -236,6 +237,11 @@ fn test_object_new(
     _ = domain;
     _ = class;
     return null;
+}
+
+fn test_object_unbox(object: *const mono.Object) callconv(.c) *anyopaque {
+    _ = object;
+    @panic("todo");
 }
 
 fn test_runtime_invoke(

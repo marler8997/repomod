@@ -34,6 +34,8 @@ pub const Funcs = struct {
     type_get_type: *const fn (*const Type) callconv(.c) TypeKind,
 
     object_new: *const fn (*const Domain, *const Class) callconv(.c) ?*const Object,
+    object_unbox: *const fn (*const Object) callconv(.c) *anyopaque,
+
     runtime_invoke: *const fn (*const Method, obj: ?*anyopaque, params: ?**anyopaque, exception: ?*?*const Object) callconv(.c) ?*const Object,
     pub fn init(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!Funcs {
         return .{
@@ -53,6 +55,7 @@ pub const Funcs = struct {
             .signature_get_params = try monoload.get(mod, .signature_get_params, proc_ref),
             .type_get_type = try monoload.get(mod, .type_get_type, proc_ref),
             .object_new = try monoload.get(mod, .object_new, proc_ref),
+            .object_unbox = try monoload.get(mod, .object_unbox, proc_ref),
             .runtime_invoke = try monoload.get(mod, .runtime_invoke, proc_ref),
         };
     }
