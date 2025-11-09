@@ -1,6 +1,6 @@
 Root <- Statement*
 Statement
-   <- IfStatement
+   <- if LPAREN Expr RPARN Block
     / fn IDENTIFIER ParamDeclList Block
     / var IDENTIFIER EQUAL Expr
     / IDENTIFIER EQUAL Expr

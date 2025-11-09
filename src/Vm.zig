@@ -410,6 +410,15 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             try vm.endSymbol();
             return .{ .statement_end = after_definition };
         },
+        .keyword_if => {
+            const after_lparen = try eat(vm.text, &vm.err).eatToken(
+                first_token.end,
+                .l_paren,
+                "a '(' to start the if conditional",
+            );
+            _ = after_lparen;
+            return vm.err.set(.{ .not_implemented = "if" });
+        },
         .keyword_var => {
             const id_extent = blk: {
                 const id_token = lex(vm.text, first_token.end);
@@ -807,7 +816,7 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
         .builtin => {
             const id = vm.text[first_token.start..first_token.end];
             const builtin = builtin_map.get(id) orelse return vm.err.set(.{ .unknown_builtin = first_token });
-            const next = try eat(vm.text, &vm.err).eatToken(first_token.end, .l_paren);
+            const next = try eat(vm.text, &vm.err).eatToken(first_token.end, .l_paren, "a '(' to start the builtin args");
             const args_addr = vm.mem.top();
             const args_end = try vm.evalFnCallArgs(.{ .builtin = builtin.params() }, next);
             try vm.evalBuiltin(first_token.extent(), builtin, args_addr);
@@ -1315,25 +1324,11 @@ const VmEat = struct {
     text: []const u8,
     err: *Error,
 
-    fn eatToken(vm: VmEat, start: usize, what: enum {
-        l_paren,
-        l_brace,
-        identifier,
-    }) error{Vm}!usize {
+    fn eatToken(vm: VmEat, start: usize, expected_tag: Token.Tag, expected: [:0]const u8) error{Vm}!usize {
         const t = lex(vm.text, start);
-        const expected_tag: Token.Tag = switch (what) {
-            .l_paren => .l_paren,
-            .l_brace => .l_brace,
-            .identifier => .identifier,
-        };
-        if (t.tag != expected_tag) return vm.err.set(.{ .unexpected_token = .{
-            .expected = switch (what) {
-                .l_paren => "an open paren '('",
-                .l_brace => "an open brace '{'",
-                .identifier => "an identifier",
-            },
-            .token = t,
-        } });
+        if (t.tag != expected_tag) return vm.err.set(.{
+            .unexpected_token = .{ .expected = expected, .token = t },
+        });
         return t.end;
     }
 
@@ -1442,13 +1437,14 @@ const VmEat = struct {
             .number_literal,
             => return first_token.end,
             .builtin => {
-                const after_l_paren = try vm.eatToken(first_token.end, .l_paren);
+                const after_l_paren = try vm.eatToken(first_token.end, .l_paren, "a '(' to start the if conditional");
                 return try vm.evalFnCallArgs(after_l_paren);
             },
             .keyword_new => {
-                const after_id = try vm.eatToken(first_token.end, .identifier);
-                const after_l_paren = try vm.eatToken(after_id, .l_paren);
-                return try vm.evalFnCallArgs(after_l_paren);
+                @panic("todo");
+                // const after_id = try vm.eatToken(first_token.end, .identifier);
+                // const after_l_paren = try vm.eatToken(after_id, .l_paren);
+                // return try vm.evalFnCallArgs(after_l_paren);
             },
             else => null,
         };
@@ -1703,6 +1699,7 @@ const BinaryOp = enum {
             .comma,
             .number_literal,
             .keyword_fn,
+            .keyword_if,
             .keyword_new,
             .keyword_var,
             => null,
@@ -1810,6 +1807,7 @@ const Token = struct {
         // doc_comment,
         // container_doc_comment,
         keyword_fn,
+        keyword_if,
         keyword_new,
         keyword_var,
     };
@@ -1833,7 +1831,7 @@ const Token = struct {
         // .{ "extern", .keyword_extern },
         .{ "fn", .keyword_fn },
         // .{ "for", .keyword_for },
-        // .{ "if", .keyword_if },
+        .{ "if", .keyword_if },
         // .{ "inline", .keyword_inline },
         .{ "new", .keyword_new },
         // .{ "noalias", .keyword_noalias },
@@ -1893,6 +1891,7 @@ const TokenFmt = struct {
             .@">=" => try writer.writeAll("a greater than or equal '>=' operator"),
             .number_literal => try writer.print("a number literal {s}", .{f.text[f.token.start..f.token.end]}),
             .keyword_fn => try writer.writeAll("the 'fn' keyword"),
+            .keyword_if => try writer.writeAll("the 'if' keyword"),
             .keyword_new => try writer.writeAll("the 'new' keyword"),
             .keyword_var => try writer.writeAll("the 'var' keyword"),
         }
@@ -3235,6 +3234,7 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
 
 fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "var example_id = @Nothing()", "1: nothing was assigned to identifier 'example_id'");
+    try testBadCode(mono_funcs, "@Nothing", "1: syntax error: expected a '(' to start the builtin args but got EOF");
     try testBadCode(mono_funcs, "fn", "1: syntax error: expected an identifier after 'fn' but got EOF");
     try testBadCode(mono_funcs, "fn @Nothing()", "1: syntax error: expected an identifier after 'fn' but got the builtin function '@Nothing'");
     try testBadCode(mono_funcs, "fn foo", "1: syntax error: expected an open paren '(' to start function args but got EOF");
@@ -3447,6 +3447,11 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, "@Log(0 >= 0)");
     try testCode(mono_funcs, "@Log(0 == 0+1)");
     try testCode(mono_funcs, "@Log(0+1 == 0+1)");
+    if (false) try testCode(mono_funcs,
+        \\if (10 > 9) {
+        \\    @Log("Hello")
+        \\}
+    );
     try testCode(mono_funcs,
         \\var counter = 0
         \\fn RepeatMe() {
