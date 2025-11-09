@@ -3,21 +3,23 @@ Statement
    <- IfStatement
     / fn IDENTIFIER ParamDeclList Block
     / IDENTIFIER EQUAL Expr
-    / Expr (EQUAL Expr)?
-Expr  <- Expr2 (KEYWORD_or Expr2)*
-Expr2 <- Expr3 (KEYWORD_and Expr3)*
-...ExprX eventually becomes PrimaryExpr
+    / Expr
+
+Expr <- Expr2 (BinaryOp Expr2)*
+
 PrimaryExpr
   <- IfExpr
    / KEYWORD_break Expr
    / KEYWORD_continue Expr
    / KEYWORD_return Expr
    / Block
-   / PrimaryTypeExpr ExprSuffix
+   / Expr
+
+PrimaryTypeExpr ExprSuffix
 
 ExprSuffix <- (SuffixOp / FnCallArgs)*
 
-PrimaryTypeExpr
+Expr2
     <- BUILTINIDENTIFIER FnCallArgs
      / NEW IDENTIFIER FnCallArgs
      / CHAR_LITERAL

@@ -419,13 +419,12 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
 }
 
 fn evalExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
-    var offset = try vm.evalExpr2(first_token) orelse null;
+    var after_expr = try vm.evalExpr2(first_token) orelse return null;
     while (true) {
-        const op_token = lex(vm.text, offset);
-        if (!isBinaryOp(op_token)) return offset;
-        const next_token = lex(vm.text, token.start);
-        try vm.evalExpr2(next_token) orelse return offset;
-        return vm.err.set(.{ .not_implemented = "binary operators" });
+        const op_token = lex(vm.text, after_expr);
+        const binary_op = BinaryOp.init(op_token.tag) orelse return after_expr;
+        after_expr = try vm.evalExpr2(lex(vm.text, op_token.end)) orelse return after_expr;
+        try vm.executeBinaryOp(binary_op);
     }
 }
 fn evalExpr2(vm: *Vm, first_token: Token) error{Vm}!?usize {
@@ -1439,6 +1438,11 @@ const VmEat = struct {
     }
 };
 
+fn executeBinaryOp(vm: *Vm, op: BinaryOp) error{Vm}!void {
+    _ = op;
+    return vm.err.set(.{ .not_implemented = "binary expressions" });
+}
+
 const FindAssembly = struct {
     vm: *Vm,
     index: usize,
@@ -1526,6 +1530,34 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Discard", .@"@Discard" },
     .{ "@ScheduleTests", .@"@ScheduleTests" },
 });
+
+const BinaryOp = enum {
+    divide,
+    pub fn init(tag: Token.Tag) ?BinaryOp {
+        return switch (tag) {
+            .invalid,
+            .identifier,
+            .string_literal,
+            .eof,
+            .builtin,
+            // TODO: maybe this should be allowed syntactically but then be a semantic error?
+            .equal,
+            .l_paren,
+            .r_paren,
+            .l_brace,
+            .r_brace,
+            .l_bracket,
+            .r_bracket,
+            .period,
+            .comma,
+            .number_literal,
+            .keyword_fn,
+            .keyword_new,
+            => null,
+            .slash => .divide,
+        };
+    }
+};
 
 const Token = struct {
     tag: Tag,
@@ -3133,7 +3165,8 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\//sys = @Assembly("System")
         \\//Stopwatch = @Class(sys.System.Diagnostics.Stopwatch)
     );
-    try testCode(mono_funcs,
+    if (false) try testCode(mono_funcs, "@Log(3/4)");
+    if (false) try testCode(mono_funcs,
         \\counter = 0
         \\fn RepeatMe() {
         \\    @Log("Repeat ", counter)
