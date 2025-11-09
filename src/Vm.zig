@@ -2941,7 +2941,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\Console.WriteLine()
         \\//Console.WriteLine("Hello")
         \\Environment = @Class(mscorlib.System.Environment)
-        \\//@Discard(Environment.get_TickCount())
+        \\@Discard(Environment.get_TickCount())
         \\//@Discard(Environment.get_MachineName())
         \\
         \\//sys = @Assembly("System")

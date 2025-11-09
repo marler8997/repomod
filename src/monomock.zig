@@ -35,10 +35,34 @@ pub const funcs: mono.Funcs = .{
 
 pub const Domain = struct {
     attached_thread: ?MockThread = null,
+    gpa: std.heap.DebugAllocator(.{
+        // this will only every be used by a single thread
+        .thread_safe = false,
+    }) = .{},
+    objects: std.SinglyLinkedList = .{},
 
     pub fn deinit(domain: *Domain) void {
-        _ = domain;
+        {
+            var maybe_node = domain.objects.first;
+            while (maybe_node) |node| {
+                const object: *MockObject = @fieldParentPtr("list_node", node);
+                const next_saved = node.next; // save before we destroy
+                domain.gpa.allocator().destroy(object);
+                maybe_node = next_saved;
+            }
+        }
+
+        const result = domain.gpa.deinit();
+        std.debug.assert(.ok == result);
     }
+
+    pub fn new(domain: *Domain, data: MockObject.Data) *MockObject {
+        const object = domain.gpa.allocator().create(MockObject) catch |e| oom(e);
+        object.* = .{ .list_node = .{}, .data = data };
+        domain.objects.prepend(&object.list_node);
+        return object;
+    }
+
     pub fn fromMono(domain: *const mono.Domain) *const Domain {
         return @ptrCast(@alignCast(domain));
     }
@@ -60,11 +84,15 @@ const MockThread = struct {
 fn mock_get_root_domain() callconv(.c) ?*const mono.Domain {
     return (thread_local_root_domain orelse return null).toMono();
 }
-fn mock_domain_get() callconv(.c) ?*const mono.Domain {
+
+fn domain_get() ?*Domain {
     const domain = thread_local_root_domain orelse return null;
     const attached_thread = domain.attached_thread orelse return null;
     if (attached_thread.id != std.Thread.getCurrentId()) return null;
-    return domain.toMono();
+    return domain;
+}
+fn mock_domain_get() callconv(.c) ?*const mono.Domain {
+    return if (domain_get()) |d| d.toMono() else null;
 }
 fn mock_thread_attach(d: *const mono.Domain) callconv(.c) ?*const mono.Thread {
     const domain: *Domain = @constCast(Domain.fromMono(d));
@@ -152,6 +180,20 @@ const MockType = struct {
         return @ptrCast(@alignCast(t));
     }
     pub fn toMono(t: *const MockType) *const mono.Type {
+        return @ptrCast(t);
+    }
+};
+
+const MockObject = struct {
+    list_node: std.SinglyLinkedList.Node,
+    data: Data,
+    pub const Data = union(enum) {
+        i4: i32,
+    };
+    pub fn fromMono(t: *const mono.Object) *const MockObject {
+        return @ptrCast(@alignCast(t));
+    }
+    pub fn toMono(t: *const MockObject) *const mono.Object {
         return @ptrCast(t);
     }
 };
@@ -305,9 +347,11 @@ fn mock_object_new(
     return null;
 }
 
-fn mock_object_unbox(object: *const mono.Object) callconv(.c) *anyopaque {
-    _ = object;
-    @panic("todo");
+fn mock_object_unbox(o: *const mono.Object) callconv(.c) *anyopaque {
+    const object: *const MockObject = .fromMono(o);
+    return switch (object.data) {
+        .i4 => |*value| @ptrCast(@constCast(value)),
+    };
 }
 
 fn mock_runtime_invoke(
@@ -325,10 +369,16 @@ fn mock_runtime_invoke(
     switch (method.sig.return_type.kind) {
         .void => return null,
         .i4 => {
-            @panic("todo: implement 32-bit integer return type");
+            const domain = domain_get().?;
+            // TODO: we should actually implement the real method
+            return domain.new(.{ .i4 = 0x12345678 }).toMono();
         },
         else => std.debug.panic("todo: implement non-void return type", .{}),
     }
+}
+
+fn oom(e: error{OutOfMemory}) noreturn {
+    @panic(@errorName(e));
 }
 
 const std = @import("std");
