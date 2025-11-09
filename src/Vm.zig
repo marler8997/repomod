@@ -3760,18 +3760,6 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, "if(1){}");
     try testCode(mono_funcs, " if (0 > 1) { @Log(\"if statement!\") }");
     try testCode(mono_funcs, " if (0 < 1) { @Log(\"if statement!\") }");
-    // try testCode(mono_funcs, "fn foo(){}@ScheduleMs(0, foo)");
-    // try testCode(mono_funcs,
-    //     \\var counter = 0
-    //     \\fn RepeatMe() {
-    //     \\    @Log("Repeat ", counter)
-    //     \\    counter = counter + 1
-    //     \\    if (counter < 5) {
-    //     \\        @ScheduleMs(0, RepeatMe)
-    //     \\    }
-    //     \\}
-    //     \\RepeatMe()
-    // );
     try testCode(mono_funcs, "yield 0");
     try testCode(mono_funcs, "startloop");
     try testCode(mono_funcs, "startloop endloop");
