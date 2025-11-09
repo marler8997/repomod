@@ -835,20 +835,29 @@ fn evalFnCallArgsManaged(vm: *Vm, start: usize) error{Vm}!struct {
 }
 
 const Params = union(enum) {
-    builtin: []const BuiltinParamType,
+    builtin: ?[]const BuiltinParamType,
     script: u16,
-    pub fn count(params: Params) u16 {
+    pub fn count(params: Params) ?u16 {
         return switch (params) {
-            .builtin => |types| @intCast(types.len),
+            .builtin => |maybe_types| @intCast((maybe_types orelse return null).len),
             .script => |c| c,
+        };
+    }
+    pub fn indexInRange(params: Params, index: u16) bool {
+        return switch (params) {
+            .builtin => |maybe_types| index < (maybe_types orelse return true).len,
+            .script => |c| index < c,
         };
     }
     pub fn expectedType(params: Params, arg_index: u16) ?Type {
         return switch (params) {
-            .builtin => |param_types| if (arg_index < param_types.len) switch (param_types[arg_index]) {
-                .anything => null,
-                .concrete => |t| t,
-            } else null,
+            .builtin => |maybe_param_types| {
+                const param_types = maybe_param_types orelse return null;
+                return if (arg_index < param_types.len) switch (param_types[arg_index]) {
+                    .anything => null,
+                    .concrete => |t| t,
+                } else null;
+            },
             .script => null,
         };
     }
@@ -863,7 +872,7 @@ fn evalFnCallArgs(vm: *Vm, params: Params, start: usize) error{Vm}!usize {
             text_offset = first_token.end;
             break;
         }
-        if (arg_index < params.count()) {
+        if (params.indexInRange(arg_index)) {
             const arg_addr = vm.mem.top();
             text_offset = try vm.evalExpr(first_token) orelse return vm.err.set(.{ .unexpected_token = .{
                 .expected = "an expression",
@@ -889,7 +898,7 @@ fn evalFnCallArgs(vm: *Vm, params: Params, start: usize) error{Vm}!usize {
 
         if (arg_index == std.math.maxInt(u16)) return vm.err.set(.{ .arg_count = .{
             .start = start,
-            .expected = params.count(),
+            .expected = params.count() orelse std.math.maxInt(u16),
             .actual = @as(u17, std.math.maxInt(u16)) + 1,
         } });
         arg_index += 1;
@@ -907,11 +916,13 @@ fn evalFnCallArgs(vm: *Vm, params: Params, start: usize) error{Vm}!usize {
             }
         }
     }
-    if (arg_index != params.count()) return vm.err.set(.{ .arg_count = .{
-        .start = start,
-        .expected = params.count(),
-        .actual = arg_index,
-    } });
+    if (params.count()) |expected_count| if (arg_index != expected_count) return vm.err.set(.{
+        .arg_count = .{
+            .start = start,
+            .expected = expected_count,
+            .actual = arg_index,
+        },
+    });
     return text_offset;
 }
 
@@ -1016,12 +1027,11 @@ fn log(vm: *Vm, writer: *std.Io.Writer, args_addr: Memory.Addr) error{WriteFaile
                 .managed_string => {
                     @panic("todo");
                 },
-                .script_function => @panic("todo"),
-                .assembly => @panic("todo"),
-                .assembly_field => @panic("todo"),
-                .class => @panic("todo"),
-                .class_member => @panic("todo"),
-                // .object => @panic("todo"),
+                .script_function => |start| try writer.print("<script function:{}>", .{start}),
+                .assembly => try writer.print("<assembly>", .{}),
+                .assembly_field => try writer.print("<assembly-field>", .{}),
+                .class => try writer.print("<class>", .{}),
+                .class_member => try writer.print("<class-member", .{}),
             }
         }
     }
@@ -1485,10 +1495,10 @@ const Builtin = enum {
     @"@Discard",
     //
     @"@ScheduleTests",
-    pub fn params(builtin: Builtin) []const BuiltinParamType {
+    pub fn params(builtin: Builtin) ?[]const BuiltinParamType {
         return switch (builtin) {
             .@"@Nothing" => &.{},
-            .@"@Log" => &.{.anything},
+            .@"@Log" => null,
             .@"@LogAssemblies" => &.{},
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
             .@"@Class" => &.{.{ .concrete = .assembly_field }},
@@ -3084,8 +3094,13 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\mscorlib = @Assembly("mscorlib")
         \\Environment = @Class(mscorlib.System.Environment)
         \\@Log(Environment.get_TickCount())
-        \\//@Log("TickCount: ", Environment.get_TickCount())
-        \\@Log(Environment.get_MachineName())
+        \\@Log("TickCount: ", Environment.get_TickCount())
+        \\//@Log(Environment.get_MachineName())
+        \\fn foo(){} @Log(foo)
+        \\@Log(mscorlib)
+        \\@Log(mscorlib.Foo.Bar)
+        \\@Log(Environment)
+        \\@Log(Environment.Foo)
     );
     try testCode(mono_funcs,
         \\mscorlib = @Assembly("mscorlib")
