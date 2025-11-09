@@ -33,7 +33,8 @@ const ReturnStorage = struct {
 const Type = enum {
     integer,
     string_literal,
-    c_string,
+    // c_string,
+    managed_string,
     script_function,
     assembly,
     assembly_field,
@@ -44,7 +45,8 @@ const Type = enum {
         return switch (t) {
             .integer => "an integer",
             .string_literal => "a string literal",
-            .c_string => "a string",
+            // .c_string => "a string",
+            .managed_string => "a managed string",
             .script_function => "a function",
             .assembly => "an assembly",
             .assembly_field => "an assembly field",
@@ -57,7 +59,8 @@ const Type = enum {
         return switch (t) {
             .integer => true,
             .string_literal => true,
-            .c_string => true,
+            // .c_string => true,
+            .managed_string => true,
             // to send a function like a callback, I think we'll want some
             // sort of @CompileFunction() builtin or something so we
             // can store/save the data required on the stack
@@ -449,7 +452,8 @@ fn evalExprSuffix(
             return switch (expr_type_ptr.*) {
                 .integer,
                 .string_literal,
-                .c_string,
+                // .c_string,
+                .managed_string,
                 .script_function,
                 => vm.err.set(.{ .no_field = .{
                     .start = suffix_op_token.start,
@@ -514,11 +518,16 @@ fn evalExprSuffix(
                         break :blk previous;
                     };
                     const method_id = try vm.managedId(method_id_extent);
-                    // const method = vm.mono_funcs.class_get_method_form_name
-                    // if (true) std.debug.panic("TODO: call '{s}'\n", .{method_id});
-
                     const args_addr = vm.mem.top();
                     const args = try vm.evalFnCallArgsManaged(suffix_op_token.end);
+
+                    // NOTE: we could push the args on the vm.mem stack, but, having a reasonable
+                    //       max like 100 is probably fine right?
+                    const max_arg_count = 100;
+                    if (args.count > max_arg_count) return vm.err.set(.{ .static_error = .{
+                        .pos = suffix_op_token.start,
+                        .string = "too many args for managed function (current max is 100)",
+                    } });
 
                     const method = vm.mono_funcs.class_get_method_from_name(
                         member.class,
@@ -535,26 +544,60 @@ fn evalExprSuffix(
                     const return_type = vm.mono_funcs.signature_get_return_type(method_sig) orelse @panic(
                         "method has no return type?", // impossible right?
                     );
-                    if (args.count == 0) {
-                        std.debug.assert(args_addr.eql(vm.mem.top()));
-                        // TODO: add check that scans to see if anyone is pointing to discarded memory?
-                        // _ = vm.mem.discardFrom(expr_addr);
-                    } else {
-                        return vm.err.set(.{ .not_implemented = "call method with args" });
+
+                    var managed_args_buf: [max_arg_count]*anyopaque = undefined;
+
+                    var next_arg_addr = args_addr;
+                    for (0..args.count) |arg_index| {
+                        const arg_type, next_arg_addr = vm.readValue(Type, next_arg_addr);
+                        const arg_value, next_arg_addr = vm.readAnyValue(arg_type, next_arg_addr);
+                        managed_args_buf[arg_index] = blk: switch (arg_value) {
+                            .string_literal => |extent| {
+                                const slice = vm.text[extent.start + 1 .. extent.end - 1];
+                                const str = vm.mono_funcs.string_new_len(
+                                    vm.mono_funcs.domain_get().?,
+                                    slice.ptr,
+                                    std.math.cast(c_uint, slice.len) orelse return vm.err.set(.{ .static_error = .{
+                                        .pos = suffix_op_token.start,
+                                        .string = "native string too long",
+                                    } }),
+                                ) orelse return vm.err.set(.{ .static_error = .{
+                                    .pos = suffix_op_token.start,
+                                    .string = "native string to managed returned null",
+                                } });
+                                break :blk @ptrCast(@constCast(str));
+                            },
+                            .managed_string => |handle| {
+                                const str = vm.mono_funcs.gchandle_get_target(handle);
+                                // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                                // const c_str = vm.mono_funcs.string_to_utf8(@ptrCast(@constCast(managed_args_buf[arg_index]))) orelse @panic("here");
+                                // defer vm.mono_funcs.free(@ptrCast(@constCast(c_str)));
+                                // std.debug.print("ManagedString value is '{s}'", .{std.mem.span(c_str)});
+                                break :blk @constCast(str);
+                            },
+                            else => |a| {
+                                std.log.info("TODO: implement converting '{t}' to managed arg", .{a});
+                                return vm.err.set(.{ .not_implemented = "call method with this kind of arg" });
+                            },
+                        };
                     }
+                    std.debug.assert(next_arg_addr.eql(vm.mem.top()));
 
                     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                     // TODO: how do we know if we need an object
                     const object: ?*anyopaque = null;
-                    const params: ?**anyopaque = null;
+                    // const params: ?**anyopaque = null;
                     var maybe_exception: ?*const mono.Object = null;
 
                     const maybe_result = vm.mono_funcs.runtime_invoke(
                         method,
                         object,
-                        params,
+                        if (args.count == 0) null else @ptrCast(&managed_args_buf),
                         &maybe_exception,
                     );
+                    vm.discardValues(args_addr);
+                    _ = vm.mem.discardFrom(args_addr);
+
                     if (false) std.debug.print(
                         "Result=0x{x} Exception=0x{x}\n",
                         .{ @intFromPtr(maybe_result), @intFromPtr(maybe_exception) },
@@ -576,15 +619,21 @@ fn evalExprSuffix(
                         },
                         .string => {
                             const result = maybe_result orelse return vm.err.set(.{ .not_implemented = "error message for calling managed function with string return type that returned null" });
-                            const c_string = vm.mono_funcs.string_to_utf8(result) orelse return vm.err.set(.{
-                                .static_error = .{
-                                    .pos = suffix_op_token.start,
-                                    .string = "managed string to native returned null",
-                                },
-                            });
-                            errdefer vm.mono_funcs.free(@ptrCast(@constCast(c_string)));
-                            (try vm.push(Type)).* = .c_string;
-                            (try vm.push([*:0]const u8)).* = c_string;
+                            // const c_string = vm.mono_funcs.string_to_utf8(result) orelse return vm.err.set(.{
+                            //     .static_error = .{
+                            //         .pos = suffix_op_token.start,
+                            //         .string = "managed string to native returned null",
+                            //     },
+                            // });
+                            // errdefer vm.mono_funcs.free(@ptrCast(@constCast(c_string)));
+                            // (try vm.push(Type)).* = .c_string;
+                            // (try vm.push([*:0]const u8)).* = c_string;
+
+                            // 0 means we don't require pinning
+                            const handle = vm.mono_funcs.gchandle_new(result, 0);
+                            errdefer vm.mono_funcs.gchandle_free(handle);
+                            (try vm.push(Type)).* = .managed_string;
+                            (try vm.push(mono.GcHandle)).* = handle;
                         },
                         else => |kind| {
                             std.debug.print("ReturnTypeKind={t}\n", .{kind});
@@ -633,8 +682,11 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             const token_start_ptr = vm.mem.toPointer(usize, value_addr);
             (try vm.push(usize)).* = token_start_ptr.*;
         },
-        .c_string => {
-            return vm.err.set(.{ .not_implemented = "pushValueFromAddr c_string" });
+        // .c_string => {
+        //     return vm.err.set(.{ .not_implemented = "pushValueFromAddr c_string" });
+        // },
+        .managed_string => {
+            return vm.err.set(.{ .not_implemented = "pushValueFromAddr managed_string" });
         },
         .script_function => {
             (try vm.push(Type)).* = .script_function;
@@ -1011,9 +1063,13 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
             std.debug.assert(vm.text[token.end - 1] == '"');
             return .{ .{ .string_literal = token.extent() }, end };
         },
-        .c_string => {
-            const ptr, const end = vm.readValue([*:0]const u8, addr);
-            return .{ .{ .c_string = ptr }, end };
+        // .c_string => {
+        //     const ptr, const end = vm.readValue([*:0]const u8, addr);
+        //     return .{ .{ .c_string = ptr }, end };
+        // },
+        .managed_string => {
+            const handle, const end = vm.readValue(mono.GcHandle, addr);
+            return .{ .{ .managed_string = handle }, end };
         },
         .script_function => {
             const param_start, const end = vm.readValue(usize, addr);
@@ -1065,7 +1121,8 @@ fn readValue(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { T, Memory.Ad
 const Value = union(enum) {
     integer: i64,
     string_literal: Extent,
-    c_string: [*:0]const u8,
+    // c_string: [*:0]const u8,
+    managed_string: mono.GcHandle,
     script_function: usize,
     assembly: *const mono.Assembly,
     assembly_field: struct {
@@ -1081,7 +1138,8 @@ const Value = union(enum) {
         switch (value.*) {
             .integer => {},
             .string_literal => {},
-            .c_string => |ptr| mono_funcs.free(@ptrCast(@constCast(ptr))),
+            // .c_string => |ptr| mono_funcs.free(@ptrCast(@constCast(ptr))),
+            .managed_string => |handle| mono_funcs.gchandle_free(handle),
             .script_function => {},
             .assembly => {},
             .assembly_field => {},
@@ -1094,7 +1152,8 @@ const Value = union(enum) {
         return switch (value.*) {
             .integer => .integer,
             .string_literal => .string_literal,
-            .c_string => .c_string,
+            // .c_string => .c_string,
+            .managed_string => .managed_string,
             .script_function => .script_function,
             .assembly => .assembly,
             .assembly_field => .assembly_field,

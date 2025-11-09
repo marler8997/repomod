@@ -30,8 +30,12 @@ pub const funcs: mono.Funcs = .{
     .type_get_type = mock_type_get_type,
     .object_new = mock_object_new,
     .object_unbox = mock_object_unbox,
+    .gchandle_new = mock_gchandle_new,
+    .gchandle_free = mock_gchandle_free,
+    .gchandle_get_target = mock_gchandle_get_target,
     .runtime_invoke = mock_runtime_invoke,
     .string_to_utf8 = mock_string_to_utf8,
+    .string_new_len = mock_string_new_len,
     .free = mock_free,
 };
 
@@ -410,6 +414,20 @@ fn mock_object_unbox(o: *const mono.Object) callconv(.c) *anyopaque {
     };
 }
 
+fn mock_gchandle_new(o: *const mono.Object, pinned: i32) callconv(.c) mono.GcHandle {
+    _ = o;
+    _ = pinned;
+    @panic("todo");
+}
+fn mock_gchandle_free(handle: mono.GcHandle) callconv(.c) void {
+    _ = handle;
+    @panic("todo");
+}
+fn mock_gchandle_get_target(handle: mono.GcHandle) callconv(.c) *const mono.Object {
+    _ = handle;
+    @panic("todo");
+}
+
 fn mock_runtime_invoke(
     method_opaque: *const mono.Method,
     obj: ?*anyopaque,
@@ -435,6 +453,18 @@ fn mock_runtime_invoke(
 fn mock_string_to_utf8(object_mono: *const mono.Object) callconv(.c) ?[*:0]const u8 {
     const object: *const MockObject = .fromMono(object_mono);
     _ = object;
+    @panic("todo");
+}
+
+fn mock_string_new_len(
+    d: *const mono.Domain,
+    text: [*]const u8,
+    len: c_uint,
+) callconv(.c) ?*const mono.String {
+    const domain: *const Domain = .fromMono(d);
+    _ = domain;
+    _ = text;
+    _ = len;
     @panic("todo");
 }
 

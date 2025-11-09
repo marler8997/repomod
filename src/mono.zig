@@ -8,6 +8,8 @@ pub const Method = opaque {};
 pub const MethodSignature = opaque {};
 pub const Type = opaque {};
 pub const Object = opaque {};
+pub const GcHandle = enum(u32) { _ };
+pub const String = opaque {};
 
 pub const Callback = fn (data: *anyopaque, user_data: ?*anyopaque) callconv(.c) void;
 
@@ -38,9 +40,14 @@ pub const Funcs = struct {
     object_new: *const fn (*const Domain, *const Class) callconv(.c) ?*const Object,
     object_unbox: *const fn (*const Object) callconv(.c) *anyopaque,
 
+    gchandle_new: *const fn (*const Object, pinned: i32) callconv(.c) GcHandle,
+    gchandle_free: *const fn (handle: GcHandle) callconv(.c) void,
+    gchandle_get_target: *const fn (handle: GcHandle) callconv(.c) *const Object,
+
     runtime_invoke: *const fn (*const Method, obj: ?*anyopaque, params: ?**anyopaque, exception: ?*?*const Object) callconv(.c) ?*const Object,
 
     string_to_utf8: *const fn (*const Object) callconv(.c) ?[*:0]const u8,
+    string_new_len: *const fn (*const Domain, text: [*]const u8, len: c_uint) callconv(.c) ?*const String,
     free: *const fn (*anyopaque) callconv(.c) void,
     pub fn init(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!Funcs {
         return .{
@@ -63,8 +70,12 @@ pub const Funcs = struct {
             .type_get_type = try monoload.get(mod, .type_get_type, proc_ref),
             .object_new = try monoload.get(mod, .object_new, proc_ref),
             .object_unbox = try monoload.get(mod, .object_unbox, proc_ref),
+            .gchandle_new = try monoload.get(mod, .gchandle_new, proc_ref),
+            .gchandle_free = try monoload.get(mod, .gchandle_free, proc_ref),
+            .gchandle_get_target = try monoload.get(mod, .gchandle_get_target, proc_ref),
             .runtime_invoke = try monoload.get(mod, .runtime_invoke, proc_ref),
             .string_to_utf8 = try monoload.get(mod, .string_to_utf8, proc_ref),
+            .string_new_len = try monoload.get(mod, .string_new_len, proc_ref),
             .free = try monoload.get(mod, .free, proc_ref),
         };
     }
