@@ -357,7 +357,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
     switch (first_token.tag) {
         .identifier => {
             const second_token = lex(vm.text, first_token.end);
-            if (second_token.tag == .equal) {
+            if (second_token.tag == .@"=") {
                 const entry = vm.lookup(vm.text[first_token.start..first_token.end]) orelse return vm.err.set(.{
                     .undefined_identifier = first_token.extent(),
                 });
@@ -421,7 +421,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             };
             const after_equal = blk: {
                 const token = lex(vm.text, id_extent.end);
-                if (token.tag != .equal) return vm.err.set(.{ .unexpected_token = .{
+                if (token.tag != .@"=") return vm.err.set(.{ .unexpected_token = .{
                     .expected = "an '=' to initialize new var",
                     .token = token,
                 } });
@@ -446,7 +446,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
     const expr_addr = vm.mem.top();
     const expr_end = try vm.evalExpr(first_token) orelse return .{ .not_statement = first_token };
     const next_token = lex(vm.text, expr_end);
-    if (next_token.tag != .equal) {
+    if (next_token.tag != .@"=") {
         if (!vm.mem.top().eql(expr_addr)) {
             const expr_type, _ = vm.readValue(Type, expr_addr);
             return vm.err.set(.{ .statement_result_ignored = .{
@@ -466,7 +466,7 @@ fn evalExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
     var after_expr = try vm.evalExpr2(first_token) orelse return null;
     while (true) {
         const op_token = lex(vm.text, after_expr);
-        const binary_op = BinaryOp.init(op_token.tag) orelse return after_expr;
+        const binary_op = BinaryOp.init(op_token.tag, .math) orelse return after_expr;
         const right_expr_addr = vm.mem.top();
         const right_token = lex(vm.text, op_token.end);
         after_expr = try vm.evalExpr2(right_token) orelse return after_expr;
@@ -1368,7 +1368,7 @@ const VmEat = struct {
         switch (first_token.tag) {
             .identifier => {
                 const second_token = lex(vm.text, first_token.end);
-                if (second_token.tag == .equal) {
+                if (second_token.tag == .@"=") {
                     const expr_first_token = lex(vm.text, second_token.end);
                     const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.err.set(.{ .unexpected_token = .{
                         .expected = "an expresson",
@@ -1383,7 +1383,7 @@ const VmEat = struct {
 
         const expr_end = try vm.evalExpr(first_token) orelse return .{ .not_statement = first_token };
         const next_token = lex(vm.text, expr_end);
-        if (next_token.tag != .equal) return .{ .statement_end = expr_end };
+        if (next_token.tag != .@"=") return .{ .statement_end = expr_end };
 
         @panic("todo");
     }
@@ -1536,6 +1536,7 @@ fn executeBinaryOp(
             });
             break :blk .{ @divTrunc(left_i64, right_i64), 0 };
         },
+        else => @panic("todo"),
     };
     if (overflow == 1) return vm.err.set(.{ .overflow_i64 = .{
         .pos = right_text_pos,
@@ -1636,10 +1637,22 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@ScheduleTests", .@"@ScheduleTests" },
 });
 
+const BinaryOpPriority = enum {
+    comparison,
+    math,
+};
 const BinaryOp = enum {
+    // math
     @"+",
     @"/",
-    pub fn init(tag: Token.Tag) ?BinaryOp {
+    // comparison
+    @"==",
+    @"!=",
+    @"<",
+    @"<=",
+    @">",
+    @">=",
+    pub fn init(tag: Token.Tag, priority: BinaryOpPriority) ?BinaryOp {
         return switch (tag) {
             .invalid,
             .identifier,
@@ -1647,7 +1660,7 @@ const BinaryOp = enum {
             .eof,
             .builtin,
             // TODO: maybe this should be allowed syntactically but then be a semantic error?
-            .equal,
+            .@"=",
             .l_paren,
             .r_paren,
             .l_brace,
@@ -1661,8 +1674,14 @@ const BinaryOp = enum {
             .keyword_new,
             .keyword_var,
             => null,
-            .plus => .@"+",
-            .slash => .@"/",
+            .plus => if (priority == .math) .@"+" else null,
+            .slash => if (priority == .math) .@"/" else null,
+            .@"==" => if (priority == .comparison) .@"==" else null,
+            .@"!=" => if (priority == .comparison) .@"!=" else null,
+            .@"<" => if (priority == .comparison) .@"<" else null,
+            .@"<=" => if (priority == .comparison) .@"<=" else null,
+            .@">" => if (priority == .comparison) .@">" else null,
+            .@">=" => if (priority == .comparison) .@">=" else null,
         };
     }
 };
@@ -1704,10 +1723,9 @@ const Token = struct {
         // pipe,
         // pipe_pipe,
         // pipe_equal,
-        equal,
-        // equal_equal,
-        // equal_angle_bracket_right,
-        // bang_equal,
+        @"=",
+        @"==",
+        @"!=",
         l_paren,
         r_paren,
         // semicolon,
@@ -1751,16 +1769,10 @@ const Token = struct {
         // ampersand,
         // ampersand_equal,
         // question_mark,
-        // angle_bracket_left,
-        // angle_bracket_left_equal,
-        // angle_bracket_angle_bracket_left,
-        // angle_bracket_angle_bracket_left_equal,
-        // angle_bracket_angle_bracket_left_pipe,
-        // angle_bracket_angle_bracket_left_pipe_equal,
-        // angle_bracket_right,
-        // angle_bracket_right_equal,
-        // angle_bracket_angle_bracket_right,
-        // angle_bracket_angle_bracket_right_equal,
+        @"<",
+        @"<=",
+        @">",
+        @">=",
         // tilde,
         number_literal,
         // doc_comment,
@@ -1829,7 +1841,9 @@ const TokenFmt = struct {
             .string_literal => try writer.print("a string literal {s}", .{f.text[f.token.start..f.token.end]}),
             .eof => try writer.writeAll("EOF"),
             .builtin => try writer.print("the builtin function '{s}'", .{f.text[f.token.start..f.token.end]}),
-            .equal => try writer.writeAll("an equal '=' character"),
+            .@"=" => try writer.writeAll("an equal '=' character"),
+            .@"==" => try writer.writeAll("an '==' operator"),
+            .@"!=" => try writer.writeAll("a '!=' operator"),
             .l_paren => try writer.writeAll("an open paren '('"),
             .r_paren => try writer.writeAll("a close paren ')'"),
             .l_brace => try writer.writeAll("an open brace '{'"),
@@ -1840,6 +1854,10 @@ const TokenFmt = struct {
             .plus => try writer.writeAll("a plus '+'"),
             .slash => try writer.writeAll("a slash '/'"),
             .comma => try writer.writeAll("a comma ','"),
+            .@"<" => try writer.writeAll("a less than '<' operator"),
+            .@"<=" => try writer.writeAll("a less than or equal '<=' operator"),
+            .@">" => try writer.writeAll("a greater than '>' operator"),
+            .@">=" => try writer.writeAll("a greater than or equal '>=' operator"),
             .number_literal => try writer.print("a number literal {s}", .{f.text[f.token.start..f.token.end]}),
             .keyword_fn => try writer.writeAll("the 'fn' keyword"),
             .keyword_new => try writer.writeAll("the 'new' keyword"),
@@ -1855,6 +1873,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
         saw_at_sign: usize,
         builtin: usize,
         string_literal: usize,
+        equal: usize,
         slash: usize,
         line_comment,
         int: usize,
@@ -1873,6 +1892,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
             },
             .builtin => |start| .{ .tag = .builtin, .start = start, .end = index },
             .saw_at_sign, .string_literal => |start| .{ .tag = .invalid, .start = start, .end = index },
+            .equal => |start| .{ .tag = .@"=", .start = start, .end = index },
             .slash => |start| .{ .tag = .slash, .start = start, .end = index },
             .int => |start| .{ .tag = .number_literal, .start = start, .end = index },
         };
@@ -1893,7 +1913,10 @@ fn lex(text: []const u8, lex_start: usize) Token {
                         state = .{ .saw_at_sign = index };
                         index += 1;
                     },
-                    '=' => return .{ .tag = .equal, .start = index, .end = index + 1 },
+                    '=' => {
+                        state = .{ .equal = index };
+                        index += 1;
+                    },
                     // '!' => continue :state .bang,
                     // '|' => continue :state .pipe,
                     '(' => return .{ .tag = .l_paren, .start = index, .end = index + 1 },
@@ -1980,6 +2003,10 @@ fn lex(text: []const u8, lex_start: usize) Token {
                 //     continue :state .invalid;
                 // },
                 // else => continue :state .string_literal,
+            },
+            .equal => |start| switch (text[index]) {
+                '=' => return .{ .tag = .@"==", .start = start, .end = index + 1 },
+                else => return .{ .tag = .@"=", .start = start, .end = index },
             },
             .slash => |start| switch (text[index]) {
                 '/' => {
@@ -2738,7 +2765,7 @@ test "lex" {
             \\
         };
         try it.expect(.identifier, "cs");
-        try it.expect(.equal, "=");
+        try it.expect(.@"=", "=");
         try it.expect(.builtin, "@Assembly");
         try it.expect(.l_paren, "(");
         try it.expect(.string_literal, "\"Assembly-CSharp\"");
@@ -2762,7 +2789,7 @@ test "lex" {
         try it.expect(.r_paren, ")");
         try it.expect(.r_brace, "}");
         try it.expect(.identifier, "cmd");
-        try it.expect(.equal, "=");
+        try it.expect(.@"=", "=");
         try it.expect(.identifier, "cs");
         try it.expect(.period, ".");
         try it.expect(.identifier, "DebugCommandHandler");
@@ -3352,14 +3379,19 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, "@Log(3+4)");
     try testCode(mono_funcs, "@Log(3/4)");
     try testCode(mono_funcs, "@Log(15/(1+4))");
-    if (false) try testCode(mono_funcs,
+    // try testCode(mono_funcs, "@Log(0 == 0)");
+    // try testCode(mono_funcs, "@Log(0 < 0)");
+    // try testCode(mono_funcs, "@Log(0 > 0)");
+    // try testCode(mono_funcs, "@Log(0 <= 0)");
+    // try testCode(mono_funcs, "@Log(0 >= 0)");
+    try testCode(mono_funcs,
         \\var counter = 0
         \\fn RepeatMe() {
         \\    @Log("Repeat ", counter)
-        \\    counter = counter + 1
-        \\    if (counter < 5) {
-        \\        @ScheduleMe(RepeatMe, 0)
-        \\    }
+        \\    //counter = counter + 1
+        \\    //if (counter < 5) {
+        \\    //    @ScheduleMs(RepeatMe, 0)
+        \\    //}
         \\}
         \\RepeatMe()
     );
