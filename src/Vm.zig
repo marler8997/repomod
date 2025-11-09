@@ -419,12 +419,23 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
 }
 
 fn evalExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
+    const first_expr_addr = vm.mem.top();
+    var left_expr_pos = first_token.start;
     var after_expr = try vm.evalExpr2(first_token) orelse return null;
     while (true) {
         const op_token = lex(vm.text, after_expr);
         const binary_op = BinaryOp.init(op_token.tag) orelse return after_expr;
-        after_expr = try vm.evalExpr2(lex(vm.text, op_token.end)) orelse return after_expr;
-        try vm.executeBinaryOp(binary_op);
+        const right_expr_addr = vm.mem.top();
+        const right_token = lex(vm.text, op_token.end);
+        after_expr = try vm.evalExpr2(right_token) orelse return after_expr;
+        try vm.executeBinaryOp(
+            binary_op,
+            left_expr_pos,
+            first_expr_addr,
+            right_token.start,
+            right_expr_addr,
+        );
+        left_expr_pos = right_token.start;
     }
 }
 fn evalExpr2(vm: *Vm, first_token: Token) error{Vm}!?usize {
@@ -1439,8 +1450,22 @@ const VmEat = struct {
     }
 };
 
-fn executeBinaryOp(vm: *Vm, op: BinaryOp) error{Vm}!void {
-    _ = op;
+fn executeBinaryOp(
+    vm: *Vm,
+    op: BinaryOp,
+    left_text_pos: usize,
+    left_addr: Memory.Addr,
+    right_text_pos: usize,
+    right_addr: Memory.Addr,
+) error{Vm}!void {
+    if (left_addr.eql(right_addr)) return vm.err.set(.{ .binary_operand_nothing = .{
+        .pos = left_text_pos,
+        .op = op,
+    } });
+    if (right_addr.eql(vm.mem.top())) return vm.err.set(.{ .binary_operand_nothing = .{
+        .pos = right_text_pos,
+        .op = op,
+    } });
     return vm.err.set(.{ .not_implemented = "binary expressions" });
 }
 
@@ -1533,8 +1558,8 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
 });
 
 const BinaryOp = enum {
-    add,
-    divide,
+    @"+",
+    @"/",
     pub fn init(tag: Token.Tag) ?BinaryOp {
         return switch (tag) {
             .invalid,
@@ -1556,8 +1581,8 @@ const BinaryOp = enum {
             .keyword_fn,
             .keyword_new,
             => null,
-            .plus => .add,
-            .slash => .divide,
+            .plus => .@"+",
+            .slash => .@"/",
         };
     }
 };
@@ -2755,6 +2780,10 @@ pub const Error = union(enum) {
         pos: usize,
         type: Type,
     },
+    binary_operand_nothing: struct {
+        pos: usize,
+        op: BinaryOp,
+    },
     static_error: struct {
         pos: usize,
         string: [:0]const u8,
@@ -2930,6 +2959,10 @@ const ErrorFmt = struct {
                 "{d}: can't marshal {s} to a managed method",
                 .{ getLineNum(f.text, c.pos), c.type.what() },
             ),
+            .binary_operand_nothing => |e| try writer.print(
+                "{d}: one side of binary operation '{t}' is nothing",
+                .{ getLineNum(f.text, e.pos), e.op },
+            ),
             .static_error => |e| try writer.print(
                 "{d}: {s}",
                 .{ getLineNum(f.text, e.pos), e.string },
@@ -3040,6 +3073,8 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "\"hello\"", "1: return value of type string_literal was ignored, use @Discard to discard it");
     try testBadCode(mono_funcs, "(", "1: syntax error: expected an expression after '(' but got EOF");
     try testBadCode(mono_funcs, "(0", "1: syntax error: expected a close paren ')' to end expression but got EOF");
+    try testBadCode(mono_funcs, "0+@Nothing()", "1: one side of binary operation '+' is nothing");
+    try testBadCode(mono_funcs, "@Nothing()+0", "1: one side of binary operation '+' is nothing");
 }
 
 const TestDomain = struct {
@@ -3173,6 +3208,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     );
     try testCode(mono_funcs, "@Log((0))");
     try testCode(mono_funcs, "@Log(((0)))");
+    if (false) try testCode(mono_funcs, "@Log(3+4)");
     if (false) try testCode(mono_funcs, "@Log(3/4)");
     if (false) try testCode(mono_funcs, "@Log(3/(1+4))");
     if (false) try testCode(mono_funcs,
