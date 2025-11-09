@@ -3094,15 +3094,6 @@ pub const Error = union(enum) {
         id_extent: Extent,
         actual_type: Type,
     },
-    needed_type: struct {
-        pos: usize,
-        context: TypeContext,
-        value: enum {
-            @"no value",
-            @"a string",
-            @"an assembly",
-        },
-    },
     statement_result_ignored: struct {
         pos: usize,
         ignored_type: Type,
@@ -3274,14 +3265,6 @@ const ErrorFmt = struct {
                     getLineNum(f.text, n.id_extent.start),
                     f.text[n.id_extent.start..n.id_extent.end],
                     n.actual_type.what(),
-                },
-            ),
-            .needed_type => |n| try writer.print(
-                "{d}: expected a {s} type but got {s}",
-                .{
-                    getLineNum(f.text, lex(f.text, n.pos).start),
-                    @tagName(n.context),
-                    @tagName(n.value),
                 },
             ),
             .statement_result_ignored => |i| try writer.print(
