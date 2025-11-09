@@ -291,20 +291,26 @@ const ManagedId = struct {
     }
 };
 
-pub fn evalRoot(vm: *Vm) error{Vm}!void {
-    std.debug.assert(vm.mem.top().eql(.zero));
+pub const Yield = struct {
+    millis: i64,
+    resume_offset: usize,
+};
 
-    var offset: usize = 0;
-    while (offset < vm.text.len) {
+pub fn evalRoot(vm: *Vm, resume_offset: usize) error{Vm}!union(enum) { done, yield: Yield } {
+    // std.debug.assert(vm.mem.top().eql(.zero));
+    var offset: usize = resume_offset;
+    while (true) {
+        std.debug.assert(offset <= vm.text.len);
         const after_statement = switch (try vm.evalStatement(offset)) {
             .not_statement => |token| {
-                if (token.tag == .eof) return;
+                if (token.tag == .eof) return .done;
                 return vm.err.set(.{ .unexpected_token = .{
                     .expected = "a statement",
                     .token = token,
                 } });
             },
             .statement_end => |end| end,
+            .yield => |yield| return .{ .yield = yield },
         };
         std.debug.assert(after_statement > offset);
         offset = after_statement;
@@ -338,6 +344,10 @@ pub fn evalFunction(
                     } });
                 },
                 .statement_end => |end| end,
+                .yield => return vm.err.set(.{ .static_error = .{
+                    .pos = lex(vm.text, offset).start,
+                    .string = "yield unsupported inside a function",
+                } }),
             };
             std.debug.assert(after_statement > offset);
             offset = after_statement;
@@ -371,6 +381,7 @@ pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}
                     } });
                 },
                 .statement_end => |end| end,
+                .yield => return vm.err.set(.{ .not_implemented = "yield inside a " ++ @tagName(kind) ++ " block" }),
             };
             std.debug.assert(after_statement > offset);
             offset = after_statement;
@@ -383,6 +394,7 @@ pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}
 fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
     not_statement: Token,
     statement_end: usize,
+    yield: Yield,
 } {
     const first_token = lex(vm.text, start);
     switch (first_token.tag) {
@@ -507,6 +519,30 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             } });
             try vm.endSymbol();
             return .{ .statement_end = after_expr };
+        },
+        .keyword_yield => {
+            const expr_first_token = lex(vm.text, first_token.end);
+            const expr_addr = vm.mem.top();
+            const expr_end = try vm.evalExpr(expr_first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                .expected = "an expression after yield",
+                .token = expr_first_token,
+            } });
+            if (expr_addr.eql(vm.mem.top())) return vm.err.set(.{ .unexpected_type = .{
+                .pos = expr_first_token.start,
+                .expected = "an integer expression after yield",
+                .actual = null,
+            } });
+            return .{ .yield = .{
+                .resume_offset = expr_end,
+                .millis = switch (vm.pop(expr_addr)) {
+                    .integer => |v| v,
+                    else => |t| return vm.err.set(.{ .unexpected_type = .{
+                        .pos = expr_first_token.start,
+                        .expected = "an integer expression after yield",
+                        .actual = t.getType(),
+                    } }),
+                },
+            } };
         },
         else => {},
     }
@@ -1145,6 +1181,47 @@ fn evalBuiltin(
             var value = vm.pop(args_addr);
             value.discard(vm.mono_funcs);
         },
+        // .@"@ScheduleMs" => {
+        //     if (args_addr.eql(vm.mem.top())) return vm.err.set(.{ .static_error = .{
+        //         .pos = builtin_extent.start,
+        //         .string = "@ScheduleMs requires at least 2 args (millisecond count and function id) but got 0",
+        //     } });
+        //     const ms_count: i64, const callable_addr = blk: {
+        //         const v, const next_arg_addr = vm.read(args_addr);
+        //         break :blk switch (v) {
+        //             .integer => |v_int| .{ v_int, next_arg_addr },
+        //             else => |t| return vm.err.set(.{ .arg_type_call_pos = .{
+        //                 .call_pos = builtin_extent.start,
+        //                 .arg_index = 0,
+        //                 .expected = .integer,
+        //                 .actual = t.getType(),
+        //             } }),
+        //         };
+        //     };
+        //     if (callable_addr.eql(vm.mem.top())) return vm.err.set(.{ .static_error = .{
+        //         .pos = builtin_extent.start,
+        //         .string = "@ScheduleMs requires at least 2 args (millisecond count and function id) but got 1",
+        //     } });
+        //     const Callable = union(enum) {
+        //         script_function: usize,
+        //     };
+        //     const callable: Callable, const callable_args_addr = blk: {
+        //         const v: Value, const callable_args_addr = vm.read(args_addr);
+        //         break :blk switch (v) {
+        //             .script_function => |pos| break :blk .{ .{ .script_function = pos }, callable_args_addr },
+        //             else => |t| return vm.err.set(.{ .arg_type_expected = .{
+        //                 .call_pos = builtin_extent.start,
+        //                 .arg_index = 0,
+        //                 .expected = "a callable object",
+        //                 .actual = t.getType(),
+        //             } }),
+        //         };
+        //     };
+        //     _ = ms_count;
+        //     _ = callable;
+        //     _ = callable_args_addr;
+        //     return vm.err.set(.{ .not_implemented = "@ScheduleMs" });
+        // },
         .@"@ScheduleTests" => {
             vm.tests_scheduled = true;
         },
@@ -1307,6 +1384,10 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
     }
 }
 
+fn read(vm: *Vm, addr: Memory.Addr) struct { Value, Memory.Addr } {
+    const value_type, const value_addr = vm.readValue(Type, addr);
+    return vm.readAnyValue(value_type, value_addr);
+}
 fn pop(vm: *Vm, addr: Memory.Addr) Value {
     const value_type, const value_addr = vm.readValue(Type, addr);
     const value, const end = vm.readAnyValue(value_type, value_addr);
@@ -1456,6 +1537,14 @@ const VmEat = struct {
                     "a ')' to finish the if conditional",
                 );
                 return .{ .statement_end = try vm.evalBlock(after_rparen, .@"if") };
+            },
+            .keyword_yield => {
+                const expr_first_token = lex(vm.text, first_token.end);
+                const expr_end = try vm.evalExpr(expr_first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "an expression after yield",
+                    .token = expr_first_token,
+                } });
+                return .{ .statement_end = expr_end };
             },
             else => {},
         }
@@ -1714,7 +1803,7 @@ const Builtin = enum {
     @"@Assembly",
     @"@Class",
     @"@Discard",
-    //
+    // @"@ScheduleMs",
     @"@ScheduleTests",
     pub fn params(builtin: Builtin) ?[]const BuiltinParamType {
         return switch (builtin) {
@@ -1724,6 +1813,7 @@ const Builtin = enum {
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
             .@"@Class" => &.{.{ .concrete = .assembly_field }},
             .@"@Discard" => &.{.anything},
+            // .@"@ScheduleMs" => null,
             .@"@ScheduleTests" => &.{},
         };
     }
@@ -1735,6 +1825,7 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Assembly", .@"@Assembly" },
     .{ "@Class", .@"@Class" },
     .{ "@Discard", .@"@Discard" },
+    // .{ "@ScheduleMs", .@"@ScheduleMs" },
     .{ "@ScheduleTests", .@"@ScheduleTests" },
 });
 
@@ -1782,6 +1873,7 @@ const BinaryOp = enum {
             .keyword_if,
             .keyword_new,
             .keyword_var,
+            .keyword_yield,
             => null,
             .plus => if (priority == .math) .@"+" else null,
             .slash => if (priority == .math) .@"/" else null,
@@ -1890,6 +1982,7 @@ const Token = struct {
         keyword_if,
         keyword_new,
         keyword_var,
+        keyword_yield,
     };
     pub const Loc = struct {
         start: usize,
@@ -1936,6 +2029,7 @@ const Token = struct {
         .{ "var", .keyword_var },
         // .{ "volatile", .keyword_volatile },
         // .{ "while", .keyword_while },
+        .{ "yield", .keyword_yield },
     });
     pub fn getKeyword(bytes: []const u8) ?Tag {
         return keywords.get(bytes);
@@ -1974,6 +2068,7 @@ const TokenFmt = struct {
             .keyword_if => try writer.writeAll("the 'if' keyword"),
             .keyword_new => try writer.writeAll("the 'new' keyword"),
             .keyword_var => try writer.writeAll("the 'var' keyword"),
+            .keyword_yield => try writer.writeAll("the 'yield' keyword"),
         }
     }
 };
@@ -2956,6 +3051,11 @@ pub const Error = union(enum) {
         err: std.fs.File.WriteError,
     },
     unexpected_token: struct { expected: [:0]const u8, token: Token },
+    unexpected_type: struct {
+        pos: usize,
+        expected: [:0]const u8,
+        actual: ?Type,
+    },
     unknown_builtin: Token,
     undefined_identifier: Extent,
     num_literal_overflow: Extent,
@@ -2980,6 +3080,12 @@ pub const Error = union(enum) {
     },
     arg_type: struct {
         arg_pos: usize,
+        arg_index: u16,
+        expected: Type,
+        actual: Type,
+    },
+    arg_type_call_pos: struct {
+        call_pos: usize,
         arg_index: u16,
         expected: Type,
         actual: Type,
@@ -3089,6 +3195,14 @@ const ErrorFmt = struct {
                     e.token.fmt(f.text),
                 },
             ),
+            .unexpected_type => |e| try writer.print(
+                "{d}: expected {s} but got {s}",
+                .{
+                    getLineNum(f.text, e.pos),
+                    e.expected,
+                    if (e.actual) |t| t.what() else "nothing",
+                },
+            ),
             .unknown_builtin => |token| try writer.print(
                 "{d}: unknown builtin '{s}'",
                 .{
@@ -3144,6 +3258,12 @@ const ErrorFmt = struct {
             }),
             .arg_type => |e| try writer.print("{d}: expected argument {} to be {s} but got {s}", .{
                 getLineNum(f.text, e.arg_pos),
+                e.arg_index,
+                e.expected.what(),
+                e.actual.what(),
+            }),
+            .arg_type_call_pos => |e| try writer.print("{d}: expected argument {} to be {s} but got {s}", .{
+                getLineNum(f.text, e.call_pos),
                 e.arg_index,
                 e.expected.what(),
                 e.actual.what(),
@@ -3307,15 +3427,22 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
         // vm.verifyStack();
         vm.deinit();
     }
-    vm.verifyStack();
-    if (vm.evalRoot()) {
-        return error.TestUnexpectedSuccess;
-    } else |_| {
-        var buf: [2000]u8 = undefined;
-        const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{vm.err.fmt(text)});
-        if (!std.mem.eql(u8, expected_error, actual_error)) {
-            std.log.err("actual error string\n\"{f}\"\n", .{std.zig.fmtString(actual_error)});
-            return error.TestUnexpectedError;
+    var resume_offset: usize = 0;
+    while (true) {
+        vm.verifyStack();
+        if (vm.evalRoot(resume_offset)) |result| switch (result) {
+            .done => return error.TestUnexpectedSuccess,
+            .yield => |yield| {
+                resume_offset = yield.resume_offset;
+            },
+        } else |_| {
+            var buf: [2000]u8 = undefined;
+            const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{vm.err.fmt(text)});
+            if (!std.mem.eql(u8, expected_error, actual_error)) {
+                std.log.err("actual error string\n\"{f}\"\n", .{std.zig.fmtString(actual_error)});
+                return error.TestUnexpectedError;
+            }
+            break;
         }
     }
 }
@@ -3396,6 +3523,13 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "if(\"hello\")", "1: if requires an integer but got a string literal");
     try testBadCode(mono_funcs, "if(0)", "1: syntax error: expected an open brace '{' to start if block but got EOF");
     try testBadCode(mono_funcs, "if(0){", "1: syntax error: expected a statement but got EOF");
+    // try testBadCode(mono_funcs, "@ScheduleMs()", "1: @ScheduleMs requires at least 2 args (millisecond count and function id) but got 0");
+    // try testBadCode(mono_funcs, "@ScheduleMs(\"hello\")", "1: expected argument 0 to be an integer but got a string literal");
+    // try testBadCode(mono_funcs, "@ScheduleMs(0)", "1: @ScheduleMs requires at least 2 args (millisecond count and function id) but got 1");
+    // try testBadCode(mono_funcs, "@ScheduleMs(0, 0)", "");
+    try testBadCode(mono_funcs, "yield", "1: syntax error: expected an expression after yield but got EOF");
+    try testBadCode(mono_funcs, "yield @Nothing()", "1: expected an integer expression after yield but got nothing");
+    try testBadCode(mono_funcs, "yield \"hello\"", "1: expected an integer expression after yield but got a string literal");
 }
 
 const TestDomain = struct {
@@ -3449,14 +3583,22 @@ fn testCode(mono_funcs: *const mono.Funcs, text: []const u8) !void {
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
     };
-    vm.verifyStack();
-    vm.evalRoot() catch {
-        std.debug.print(
-            "Failed to interpret the following code:\n---\n{s}\n---\nerror: {f}\n",
-            .{ text, vm.err.fmt(text) },
-        );
-        return error.VmError;
-    };
+    var resume_offset: usize = 0;
+    while (true) {
+        vm.verifyStack();
+        switch (vm.evalRoot(resume_offset) catch {
+            std.debug.print(
+                "Failed to interpret the following code:\n---\n{s}\n---\nerror: {f}\n",
+                .{ text, vm.err.fmt(text) },
+            );
+            return error.VmError;
+        }) {
+            .done => break,
+            .yield => |yield| {
+                resume_offset = yield.resume_offset;
+            },
+        }
+    }
     vm.logStack();
     vm.verifyStack();
     vm.deinit();
@@ -3546,18 +3688,19 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, "if(1){}");
     try testCode(mono_funcs, " if (0 > 1) { @Log(\"if statement!\") }");
     try testCode(mono_funcs, " if (0 < 1) { @Log(\"if statement!\") }");
-    try testCode(mono_funcs,
-        \\var counter = 0
-        \\fn RepeatMe() {
-        \\    @Log("Repeat ", counter)
-        \\    counter = counter + 1
-        \\    if (counter < 5) {
-        \\        //@ScheduleMs(RepeatMe, 0)
-        \\        @Log("here")
-        \\    }
-        \\}
-        \\RepeatMe()
-    );
+    // try testCode(mono_funcs, "fn foo(){}@ScheduleMs(0, foo)");
+    // try testCode(mono_funcs,
+    //     \\var counter = 0
+    //     \\fn RepeatMe() {
+    //     \\    @Log("Repeat ", counter)
+    //     \\    counter = counter + 1
+    //     \\    if (counter < 5) {
+    //     \\        @ScheduleMs(0, RepeatMe)
+    //     \\    }
+    //     \\}
+    //     \\RepeatMe()
+    // );
+    try testCode(mono_funcs, "yield 0");
 }
 
 const is_test = @import("builtin").is_test;
