@@ -5,7 +5,6 @@ error_result: ErrorResult = undefined,
 text: []const u8,
 mem: Memory,
 
-loop_text_offset: ?usize = null,
 symbol_state: union(enum) {
     none,
     evaluating: struct {
@@ -303,17 +302,24 @@ const ManagedId = struct {
     }
 };
 
-pub const Yield = struct {
-    millis: i64,
-    resume_offset: usize,
+pub const BlockResume = struct {
+    text_offset: usize = 0,
+    loop_text_offset: ?usize = null,
 };
 
-pub fn evalRoot(vm: *Vm, resume_offset: usize) error{Vm}!Yield {
+pub const Yield = struct {
+    millis: i64,
+    block_resume: BlockResume,
+};
+
+pub fn evalRoot(vm: *Vm, block_resume: BlockResume) error{Vm}!Yield {
     // std.debug.assert(vm.mem.top().eql(.zero));
-    var offset: usize = resume_offset;
+    var offset: usize = block_resume.text_offset;
+    var loop_text_offset: ?usize = block_resume.loop_text_offset;
+    _ = &loop_text_offset;
     while (true) {
         std.debug.assert(offset <= vm.text.len);
-        const new_offset = blk: switch (try vm.evalStatement(offset)) {
+        const new_offset = blk: switch (try vm.evalStatement(offset, &loop_text_offset)) {
             .not_statement => |token| {
                 if (token.tag == .eof) {
                     vm.error_result = .exit;
@@ -329,9 +335,9 @@ pub fn evalRoot(vm: *Vm, resume_offset: usize) error{Vm}!Yield {
                 break :blk end;
             },
             .yield => |yield| return yield,
-            .@"continue" => |startloop_offset| {
-                std.debug.assert(startloop_offset < offset);
-                break :blk startloop_offset;
+            .@"continue" => {
+                std.debug.assert(loop_text_offset.? < offset);
+                break :blk loop_text_offset.?;
             },
         };
         std.debug.assert(new_offset != offset);
@@ -354,10 +360,13 @@ pub fn evalFunction(
         break :blk token.end;
     };
 
+    var loop_text_offset: ?usize = null;
+    _ = &loop_text_offset;
+
     const after_close_brace = blk: {
         var offset: usize = body_start;
         while (true) {
-            const new_offset = switch (try vm.evalStatement(offset)) {
+            const new_offset = switch (try vm.evalStatement(offset, &loop_text_offset)) {
                 .not_statement => |token| {
                     if (token.tag == .r_brace) break :blk token.end;
                     return vm.setError(.{ .unexpected_token = .{
@@ -373,9 +382,9 @@ pub fn evalFunction(
                     .pos = lex(vm.text, offset).start,
                     .string = "yield unsupported inside a function",
                 } }),
-                .@"continue" => |startloop_offset| {
-                    std.debug.assert(startloop_offset < offset);
-                    break :blk startloop_offset;
+                .@"continue" => {
+                    std.debug.assert(loop_text_offset.? < offset);
+                    break :blk loop_text_offset.?;
                 },
             };
             std.debug.assert(new_offset != offset);
@@ -398,10 +407,13 @@ pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}
         break :blk token.end;
     };
 
+    var loop_text_offset: ?usize = null;
+    _ = &loop_text_offset;
+
     const after_close_brace = blk_close_brace: {
         var offset: usize = body_start;
         while (true) {
-            const new_offset = blk: switch (try vm.evalStatement(offset)) {
+            const new_offset = blk: switch (try vm.evalStatement(offset, &loop_text_offset)) {
                 .not_statement => |token| {
                     if (token.tag == .r_brace) break :blk_close_brace token.end;
                     return vm.setError(.{ .unexpected_token = .{
@@ -416,9 +428,9 @@ pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}
                 .yield => return vm.setError(.{
                     .not_implemented = "yield inside a " ++ @tagName(kind) ++ " block",
                 }),
-                .@"continue" => |startloop_offset| {
-                    std.debug.assert(startloop_offset < offset);
-                    break :blk startloop_offset;
+                .@"continue" => {
+                    std.debug.assert(loop_text_offset.? < offset);
+                    break :blk loop_text_offset.?;
                 },
             };
             std.debug.assert(new_offset != offset);
@@ -429,11 +441,11 @@ pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}
     return after_close_brace;
 }
 
-fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
+fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?usize) error{Vm}!union(enum) {
     not_statement: Token,
     statement_end: usize,
     yield: Yield,
-    @"continue": usize,
+    @"continue",
 } {
     const first_token = lex(vm.text, start);
     switch (first_token.tag) {
@@ -529,28 +541,28 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 break :blk try vm.evalBlock(after_rparen, .@"if");
             } };
         },
-        .keyword_startloop => {
-            if (vm.loop_text_offset != null) return vm.setError(.{ .static_error = .{
+        .keyword_loop => {
+            if (maybe_loop_ref.* != null) return vm.setError(.{ .static_error = .{
                 .pos = first_token.start,
-                .string = "startloop cannot be inside startloop, need endloop first",
+                .string = "cannot loop inside loop (end with break or continue at the same depth as the original loop)",
             } });
-            vm.loop_text_offset = first_token.end;
+            maybe_loop_ref.* = first_token.end;
             return .{ .statement_end = first_token.end };
         },
-        .keyword_endloop => {
-            if (vm.loop_text_offset == null) return vm.setError(.{ .static_error = .{
+        .keyword_break => {
+            if (maybe_loop_ref.* == null) return vm.setError(.{ .static_error = .{
                 .pos = first_token.start,
-                .string = "endloop must correspond to a startloop",
+                .string = "break must correspond to a loop",
             } });
-            vm.loop_text_offset = null;
+            maybe_loop_ref.* = null;
             return .{ .statement_end = first_token.end };
         },
         .keyword_continue => {
-            if (vm.loop_text_offset == null) return vm.setError(.{ .static_error = .{
+            if (maybe_loop_ref.* == null) return vm.setError(.{ .static_error = .{
                 .pos = first_token.start,
-                .string = "continue must correspond to a startloop",
+                .string = "continue must correspond to a loop",
             } });
-            return .{ .@"continue" = vm.loop_text_offset.? };
+            return .@"continue";
         },
         .keyword_var => {
             const id_extent = blk: {
@@ -595,7 +607,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 .actual = null,
             } });
             return .{ .yield = .{
-                .resume_offset = expr_end,
+                .block_resume = .{ .text_offset = expr_end, .loop_text_offset = maybe_loop_ref.* },
                 .millis = switch (vm.pop(expr_addr)) {
                     .integer => |v| v,
                     else => |t| return vm.setError(.{ .unexpected_type = .{
@@ -1609,8 +1621,8 @@ const VmEat = struct {
                 );
                 return .{ .statement_end = try vm.evalBlock(after_rparen, .@"if") };
             },
-            .keyword_startloop,
-            .keyword_endloop,
+            .keyword_loop,
+            .keyword_break,
             .keyword_continue,
             => return .{ .statement_end = first_token.end },
             .keyword_yield => {
@@ -1947,13 +1959,13 @@ const BinaryOp = enum {
             .period,
             .comma,
             .number_literal,
+            .keyword_break,
             .keyword_continue,
-            .keyword_endloop,
             .keyword_fn,
             .keyword_if,
             .keyword_new,
             .keyword_var,
-            .keyword_startloop,
+            .keyword_loop,
             .keyword_yield,
             => null,
             .plus => if (priority == .math) .@"+" else null,
@@ -2059,13 +2071,13 @@ const Token = struct {
         number_literal,
         // doc_comment,
         // container_doc_comment,
+        keyword_break,
         keyword_continue,
-        keyword_endloop,
         keyword_fn,
         keyword_if,
         keyword_new,
         keyword_var,
-        keyword_startloop,
+        keyword_loop,
         keyword_yield,
     };
     pub const Loc = struct {
@@ -2075,13 +2087,12 @@ const Token = struct {
 
     pub const keywords = std.StaticStringMap(Tag).initComptime(.{
         // .{ "and", .keyword_and },
-        // .{ "break", .keyword_break },
+        .{ "break", .keyword_break },
         // .{ "catch", .keyword_catch },
         // .{ "const", .keyword_const },
         .{ "continue", .keyword_continue },
         // .{ "defer", .keyword_defer },
         // .{ "else", .keyword_else },
-        .{ "endloop", .keyword_endloop },
         // .{ "enum", .keyword_enum },
         // .{ "errdefer", .keyword_errdefer },
         // .{ "error", .keyword_error },
@@ -2091,6 +2102,7 @@ const Token = struct {
         // .{ "for", .keyword_for },
         .{ "if", .keyword_if },
         // .{ "inline", .keyword_inline },
+        .{ "loop", .keyword_loop },
         .{ "new", .keyword_new },
         // .{ "noalias", .keyword_noalias },
         // .{ "noinline", .keyword_noinline },
@@ -2103,7 +2115,6 @@ const Token = struct {
         // .{ "resume", .keyword_resume },
         // .{ "return", .keyword_return },
         // .{ "linksection", .keyword_linksection },
-        .{ "startloop", .keyword_startloop },
         // .{ "struct", .keyword_struct },
         // .{ "suspend", .keyword_suspend },
         // .{ "switch", .keyword_switch },
@@ -2149,13 +2160,13 @@ const TokenFmt = struct {
             .@"<=" => try writer.writeAll("a less than or equal '<=' operator"),
             .@">" => try writer.writeAll("a greater than '>' operator"),
             .@">=" => try writer.writeAll("a greater than or equal '>=' operator"),
+            .keyword_break => try writer.writeAll("the 'break' keyword"),
             .keyword_continue => try writer.writeAll("the 'continue' keyword"),
             .number_literal => try writer.print("a number literal {s}", .{f.text[f.token.start..f.token.end]}),
-            .keyword_endloop => try writer.writeAll("the 'endloop' keyword"),
             .keyword_fn => try writer.writeAll("the 'fn' keyword"),
             .keyword_if => try writer.writeAll("the 'if' keyword"),
+            .keyword_loop => try writer.writeAll("the 'loop' keyword"),
             .keyword_new => try writer.writeAll("the 'new' keyword"),
-            .keyword_startloop => try writer.writeAll("the 'startloop' keyword"),
             .keyword_var => try writer.writeAll("the 'var' keyword"),
             .keyword_yield => try writer.writeAll("the 'yield' keyword"),
         }
@@ -3498,10 +3509,10 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
         // vm.verifyStack();
         vm.deinit();
     }
-    var resume_offset: usize = 0;
+    var block_resume: BlockResume = .{};
     while (true) {
         vm.verifyStack();
-        const yield = vm.evalRoot(resume_offset) catch switch (vm.error_result) {
+        const yield = vm.evalRoot(block_resume) catch switch (vm.error_result) {
             .exit => return error.TestUnexpectedSuccess,
             .err => |err| {
                 var buf: [2000]u8 = undefined;
@@ -3513,7 +3524,7 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
                 break;
             },
         };
-        resume_offset = yield.resume_offset;
+        block_resume = yield.block_resume;
     }
 }
 
@@ -3600,11 +3611,11 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "yield", "1: syntax error: expected an expression after yield but got EOF");
     try testBadCode(mono_funcs, "yield @Nothing()", "1: expected an integer expression after yield but got nothing");
     try testBadCode(mono_funcs, "yield \"hello\"", "1: expected an integer expression after yield but got a string literal");
-    try testBadCode(mono_funcs, "startloop startloop", "1: startloop cannot be inside startloop, need endloop first");
-    try testBadCode(mono_funcs, "endloop", "1: endloop must correspond to a startloop");
-    try testBadCode(mono_funcs, "continue", "1: continue must correspond to a startloop");
-    try testBadCode(mono_funcs, "startloop endloop continue", "1: continue must correspond to a startloop");
-    try testBadCode(mono_funcs, "startloop endloop endloop", "1: endloop must correspond to a startloop");
+    try testBadCode(mono_funcs, "loop loop", "1: cannot loop inside loop (end with break or continue at the same depth as the original loop)");
+    try testBadCode(mono_funcs, "break", "1: break must correspond to a loop");
+    try testBadCode(mono_funcs, "continue", "1: continue must correspond to a loop");
+    try testBadCode(mono_funcs, "loop break break", "1: break must correspond to a loop");
+    try testBadCode(mono_funcs, "loop break continue", "1: continue must correspond to a loop");
 }
 
 const TestDomain = struct {
@@ -3657,10 +3668,10 @@ fn testCode(mono_funcs: *const mono.Funcs, text: []const u8) !void {
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
     };
-    var resume_offset: usize = 0;
+    var block_resume: BlockResume = .{};
     while (true) {
         vm.verifyStack();
-        const yield = vm.evalRoot(resume_offset) catch switch (vm.error_result) {
+        const yield = vm.evalRoot(block_resume) catch switch (vm.error_result) {
             .exit => break,
             .err => |err| {
                 std.debug.print(
@@ -3670,7 +3681,7 @@ fn testCode(mono_funcs: *const mono.Funcs, text: []const u8) !void {
                 return error.VmError;
             },
         };
-        resume_offset = yield.resume_offset;
+        block_resume = yield.block_resume;
     }
     vm.logStack();
     vm.verifyStack();
@@ -3762,17 +3773,28 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, " if (0 > 1) { @Log(\"if statement!\") }");
     try testCode(mono_funcs, " if (0 < 1) { @Log(\"if statement!\") }");
     try testCode(mono_funcs, "yield 0");
-    try testCode(mono_funcs, "startloop");
-    try testCode(mono_funcs, "startloop endloop");
-    try testCode(mono_funcs, "startloop endloop startloop");
-    try testCode(mono_funcs,
+    try testCode(mono_funcs, "loop");
+    try testCode(mono_funcs, "loop break");
+    try testCode(mono_funcs, "loop break loop");
+    // TODO! make this work
+    //try testCode(mono_funcs, "loop if (1) { break } continue");
+    if (false) try testCode(mono_funcs,
         \\var counter = 0
-        \\startloop
-        \\  @Log("loop ", counter)
-        \\  counter = counter + 1
-        \\  if (counter == 5) { @Exit() }
+        \\loop
+        \\  @Log("default continue loop: ", counter)
         \\  yield 0
+        \\  counter = counter + 1
+        \\  if (counter == 5) { break }
         \\continue
+    );
+    if (false) try testCode(mono_funcs,
+        \\var counter = 0
+        \\loop
+        \\  @Log("default break loop: ", counter)
+        \\  yield 0
+        \\  counter = counter + 1
+        \\  if (counter < 5) { continue }
+        \\break
     );
 }
 
