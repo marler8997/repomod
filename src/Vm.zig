@@ -3684,6 +3684,15 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     //     \\RepeatMe()
     // );
     try testCode(mono_funcs, "yield 0");
+    try testCode(mono_funcs,
+        \\var counter = 0
+        \\// while (counter < 5) {
+        \\if (1) {
+        \\    @Log("loop ", counter)
+        \\    counter = counter + 1
+        \\    //yield 0
+        \\}
+    );
 }
 
 const is_test = @import("builtin").is_test;
