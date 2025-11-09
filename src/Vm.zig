@@ -461,15 +461,19 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
 }
 
 fn evalExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
+    return vm.evalExprBinary(first_token, .comparison);
+}
+fn evalExprBinary(vm: *Vm, first_token: Token, maybe_priority: ?BinaryOpPriority) error{Vm}!?usize {
+    const priority = maybe_priority orelse return vm.evalExprSingle(first_token);
     const first_expr_addr = vm.mem.top();
     var left_expr_pos = first_token.start;
-    var after_expr = try vm.evalExpr2(first_token) orelse return null;
+    var after_expr = try vm.evalExprBinary(first_token, priority.next()) orelse return null;
     while (true) {
         const op_token = lex(vm.text, after_expr);
-        const binary_op = BinaryOp.init(op_token.tag, .math) orelse return after_expr;
+        const binary_op = BinaryOp.init(op_token.tag, priority) orelse return after_expr;
         const right_expr_addr = vm.mem.top();
         const right_token = lex(vm.text, op_token.end);
-        after_expr = try vm.evalExpr2(right_token) orelse return after_expr;
+        after_expr = try vm.evalExprBinary(right_token, priority.next()) orelse return after_expr;
         try vm.executeBinaryOp(
             binary_op,
             left_expr_pos,
@@ -480,7 +484,7 @@ fn evalExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
         left_expr_pos = right_token.start;
     }
 }
-fn evalExpr2(vm: *Vm, first_token: Token) error{Vm}!?usize {
+fn evalExprSingle(vm: *Vm, first_token: Token) error{Vm}!?usize {
     const expr_addr = vm.mem.top();
     var offset = try vm.evalPrimaryTypeExpr(first_token) orelse return null;
     while (true) {
@@ -1536,7 +1540,12 @@ fn executeBinaryOp(
             });
             break :blk .{ @divTrunc(left_i64, right_i64), 0 };
         },
-        else => @panic("todo"),
+        .@"==" => .{ if (left_i64 == right_i64) 1 else 0, 0 },
+        .@"!=" => .{ if (left_i64 != right_i64) 1 else 0, 0 },
+        .@"<" => .{ if (left_i64 < right_i64) 1 else 0, 0 },
+        .@"<=" => .{ if (left_i64 <= right_i64) 1 else 0, 0 },
+        .@">" => .{ if (left_i64 > right_i64) 1 else 0, 0 },
+        .@">=" => .{ if (left_i64 >= right_i64) 1 else 0, 0 },
     };
     if (overflow == 1) return vm.err.set(.{ .overflow_i64 = .{
         .pos = right_text_pos,
@@ -1544,7 +1553,6 @@ fn executeBinaryOp(
         .left_i64 = left_i64,
         .right_i64 = right_i64,
     } });
-
     (try vm.push(Type)).* = .integer;
     (try vm.push(i64)).* = value;
 }
@@ -1640,6 +1648,12 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
 const BinaryOpPriority = enum {
     comparison,
     math,
+    pub fn next(priority: BinaryOpPriority) ?BinaryOpPriority {
+        return switch (priority) {
+            .comparison => .math,
+            .math => null,
+        };
+    }
 };
 const BinaryOp = enum {
     // math
@@ -1659,6 +1673,7 @@ const BinaryOp = enum {
             .string_literal,
             .eof,
             .builtin,
+            .@"!",
             // TODO: maybe this should be allowed syntactically but then be a semantic error?
             .@"=",
             .l_paren,
@@ -1719,7 +1734,7 @@ const Token = struct {
         // char_literal,
         eof,
         builtin,
-        // bang,
+        @"!",
         // pipe,
         // pipe_pipe,
         // pipe_equal,
@@ -1841,6 +1856,7 @@ const TokenFmt = struct {
             .string_literal => try writer.print("a string literal {s}", .{f.text[f.token.start..f.token.end]}),
             .eof => try writer.writeAll("EOF"),
             .builtin => try writer.print("the builtin function '{s}'", .{f.text[f.token.start..f.token.end]}),
+            .@"!" => try writer.writeAll("a '!' operator"),
             .@"=" => try writer.writeAll("an equal '=' character"),
             .@"==" => try writer.writeAll("an '==' operator"),
             .@"!=" => try writer.writeAll("a '!=' operator"),
@@ -1874,9 +1890,12 @@ fn lex(text: []const u8, lex_start: usize) Token {
         builtin: usize,
         string_literal: usize,
         equal: usize,
+        bang: usize,
         slash: usize,
         line_comment,
         int: usize,
+        angle_bracket_left: usize,
+        angle_bracket_right: usize,
     };
 
     var index = lex_start;
@@ -1893,8 +1912,11 @@ fn lex(text: []const u8, lex_start: usize) Token {
             .builtin => |start| .{ .tag = .builtin, .start = start, .end = index },
             .saw_at_sign, .string_literal => |start| .{ .tag = .invalid, .start = start, .end = index },
             .equal => |start| .{ .tag = .@"=", .start = start, .end = index },
+            .bang => |start| .{ .tag = .@"!", .start = start, .end = index },
             .slash => |start| .{ .tag = .slash, .start = start, .end = index },
             .int => |start| .{ .tag = .number_literal, .start = start, .end = index },
+            .angle_bracket_left => |start| .{ .tag = .@"<", .start = start, .end = index },
+            .angle_bracket_right => |start| .{ .tag = .@">", .start = start, .end = index },
         };
         switch (state) {
             .start => {
@@ -1917,7 +1939,10 @@ fn lex(text: []const u8, lex_start: usize) Token {
                         state = .{ .equal = index };
                         index += 1;
                     },
-                    // '!' => continue :state .bang,
+                    '!' => {
+                        state = .{ .bang = index };
+                        index += 1;
+                    },
                     // '|' => continue :state .pipe,
                     '(' => return .{ .tag = .l_paren, .start = index, .end = index + 1 },
                     ')' => return .{ .tag = .r_paren, .start = index, .end = index + 1 },
@@ -1939,8 +1964,14 @@ fn lex(text: []const u8, lex_start: usize) Token {
                     // '%' => continue :state .percent,
                     // '*' => continue :state .asterisk,
                     '+' => return .{ .tag = .plus, .start = index, .end = index + 1 },
-                    // '<' => continue :state .angle_bracket_left,
-                    // '>' => continue :state .angle_bracket_right,
+                    '<' => {
+                        state = .{ .angle_bracket_left = index };
+                        index += 1;
+                    },
+                    '>' => {
+                        state = .{ .angle_bracket_right = index };
+                        index += 1;
+                    },
                     // '^' => continue :state .caret,
                     // '\\' => {
                     //     result.tag = .multiline_string_literal_line;
@@ -2008,6 +2039,10 @@ fn lex(text: []const u8, lex_start: usize) Token {
                 '=' => return .{ .tag = .@"==", .start = start, .end = index + 1 },
                 else => return .{ .tag = .@"=", .start = start, .end = index },
             },
+            .bang => |start| switch (text[index]) {
+                '=' => return .{ .tag = .@"!=", .start = start, .end = index + 1 },
+                else => return .{ .tag = .@"!", .start = start, .end = index },
+            },
             .slash => |start| switch (text[index]) {
                 '/' => {
                     state = .line_comment;
@@ -2027,6 +2062,14 @@ fn lex(text: []const u8, lex_start: usize) Token {
                     index += 1;
                 },
                 else => return .{ .tag = .number_literal, .start = start, .end = index },
+            },
+            .angle_bracket_left => |start| switch (text[index]) {
+                '=' => return .{ .tag = .@"<=", .start = start, .end = index + 1 },
+                else => return .{ .tag = .@"<", .start = start, .end = index },
+            },
+            .angle_bracket_right => |start| switch (text[index]) {
+                '=' => return .{ .tag = .@">=", .start = start, .end = index + 1 },
+                else => return .{ .tag = .@">", .start = start, .end = index },
             },
         }
     }
@@ -3379,11 +3422,14 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, "@Log(3+4)");
     try testCode(mono_funcs, "@Log(3/4)");
     try testCode(mono_funcs, "@Log(15/(1+4))");
-    // try testCode(mono_funcs, "@Log(0 == 0)");
-    // try testCode(mono_funcs, "@Log(0 < 0)");
-    // try testCode(mono_funcs, "@Log(0 > 0)");
-    // try testCode(mono_funcs, "@Log(0 <= 0)");
-    // try testCode(mono_funcs, "@Log(0 >= 0)");
+    try testCode(mono_funcs, "@Log(0 == 0)");
+    try testCode(mono_funcs, "@Log(0 != 0)");
+    try testCode(mono_funcs, "@Log(0 < 0)");
+    try testCode(mono_funcs, "@Log(0 > 0)");
+    try testCode(mono_funcs, "@Log(0 <= 0)");
+    try testCode(mono_funcs, "@Log(0 >= 0)");
+    try testCode(mono_funcs, "@Log(0 == 0+1)");
+    try testCode(mono_funcs, "@Log(0+1 == 0+1)");
     try testCode(mono_funcs,
         \\var counter = 0
         \\fn RepeatMe() {

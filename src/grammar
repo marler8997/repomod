@@ -4,9 +4,11 @@ Statement
     / fn IDENTIFIER ParamDeclList Block
     / var IDENTIFIER EQUAL Expr
     / IDENTIFIER EQUAL Expr
-    / Expr ('=' Expr)?
+    / Expr
 
-Expr <- Expr2 (BinaryOp Expr2)*
+Expr <- ExprBinaryCompare ('=' ExprBinaryCompare)*
+ExprBinaryCompare <- ExprBinaryMath (BinaryOpComparison ExprBinaryMath)*
+ExprBinaryMath <- ExprSingle (BinaryOpMath ExprSingle)*
 
 PrimaryExpr
   <- IfExpr
@@ -20,7 +22,7 @@ PrimaryTypeExpr ExprSuffix
 
 ExprSuffix <- (SuffixOp / FnCallArgs)*
 
-Expr2
+ExprSingle
     <- BUILTINIDENTIFIER FnCallArgs
      / NEW IDENTIFIER FnCallArgs
      / CHAR_LITERAL
