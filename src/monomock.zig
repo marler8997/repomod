@@ -174,6 +174,7 @@ const MockMethod = struct {
 const MethodImpl = union(enum) {
     return_void: *const fn () void,
     return_i4: *const fn () i32,
+    return_static_string: *const fn () [:0]const u8,
     pub fn sig(impl: *const MethodImpl) *const MockMethodSignature {
         return switch (impl.*) {
             inline else => |_, tag| &@field(method_sigs, @tagName(tag)),
@@ -184,6 +185,7 @@ const MethodImpl = union(enum) {
 const types = struct {
     pub const @"void": MockType = .{ .kind = .void };
     pub const @"i4": MockType = .{ .kind = .i4 };
+    pub const string: MockType = .{ .kind = .string };
 };
 const method_sigs = struct {
     const return_void: MockMethodSignature = .{
@@ -192,6 +194,10 @@ const method_sigs = struct {
     };
     const return_i4: MockMethodSignature = .{
         .return_type = types.i4,
+        .param_count = 0,
+    };
+    const return_static_string: MockMethodSignature = .{
+        .return_type = types.string,
         .param_count = 0,
     };
 };
@@ -221,6 +227,7 @@ const MockObject = struct {
     data: Data,
     pub const Data = union(enum) {
         i4: i32,
+        static_string: [:0]const u8,
     };
     pub fn fromMono(t: *const mono.Object) *const MockObject {
         return @ptrCast(@alignCast(t));
@@ -265,6 +272,9 @@ fn @"System.Environment.get_TickCount"() i32 {
         return @truncate(std.time.timestamp());
     }
 }
+fn @"System.Environment.get_MachineName"() [:0]const u8 {
+    return "MonoMockDummyMachine";
+}
 
 // .{ .name = "Object", .methods = &[_]MockMethod{
 //     .{ .name = ".ctor", .sig = .{
@@ -286,6 +296,7 @@ const assemblies = [_]MockAssembly{
                 } },
                 .{ .name = "Environment", .methods = &[_]MockMethod{
                     .{ .name = "get_TickCount", .impl = .{ .return_i4 = &@"System.Environment.get_TickCount" } },
+                    .{ .name = "get_MachineName", .impl = .{ .return_static_string = &@"System.Environment.get_MachineName" } },
                 } },
                 .{ .name = "Object", .methods = &[_]MockMethod{} },
             } },
@@ -411,6 +422,7 @@ fn mock_object_unbox(o: *const mono.Object) callconv(.c) *anyopaque {
     const object: *const MockObject = .fromMono(o);
     return switch (object.data) {
         .i4 => |*value| @ptrCast(@constCast(value)),
+        .static_string => @panic("codebug?"),
     };
 }
 
@@ -447,6 +459,9 @@ fn mock_runtime_invoke(
             return null;
         },
         .return_i4 => |f| return domain.new(.{ .i4 = f() }).toMono(),
+        .return_static_string => |f| {
+            return domain.new(.{ .static_string = f() }).toMono();
+        },
     }
 }
 

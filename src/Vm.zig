@@ -921,9 +921,20 @@ fn evalBuiltin(
     builtin: Builtin,
     args_addr: Memory.Addr,
 ) error{Vm}!void {
-    _ = builtin_extent;
     switch (builtin) {
         .@"@Nothing" => {},
+        .@"@Log" => {
+            var buffer: [1000]u8 = undefined;
+            var stderr = std.fs.File.stderr().writer(&buffer);
+            vm.log(&stderr.interface, args_addr) catch |err| switch (err) {
+                error.WriteFailed => return vm.err.set(.{ .log_error = .{
+                    .pos = builtin_extent.start,
+                    .err = stderr.err orelse error.Unexpected,
+                } }),
+            };
+            vm.discardValues(args_addr);
+            _ = vm.mem.discardFrom(args_addr);
+        },
         .@"@LogAssemblies" => {
             var context: LogAssemblies = .{ .vm = vm, .index = 0 };
             std.log.info("mono_assembly_foreach:", .{});
@@ -980,6 +991,42 @@ fn evalBuiltin(
             vm.tests_scheduled = true;
         },
     }
+}
+
+fn log(vm: *Vm, writer: *std.Io.Writer, args_addr: Memory.Addr) error{WriteFailed}!void {
+    try writer.writeAll("@Log: ");
+    // {
+    //     var time: win32.SYSTEMTIME = undefined;
+    //     win32.GetSystemTime(&time);
+    //     writer.print(
+    //         "mod: {:0>2}:{:0>2}:{:0>2}.{:0>3}|{}|" ++ level_txt ++ scope_suffix ++ "|",
+    //         .{ time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, win32.GetCurrentThreadId() },
+    //     ) catch |err| std.debug.panic("print log prefix failed with {s}", .{@errorName(err)});
+    // }
+
+    {
+        var next_addr = args_addr;
+        while (!next_addr.eql(vm.mem.top())) {
+            const value_type, next_addr = vm.readValue(Type, next_addr);
+            std.debug.assert(!next_addr.eql(vm.mem.top()));
+            const value, next_addr = vm.readAnyValue(value_type, next_addr);
+            switch (value) {
+                .integer => |i| try writer.print("{d}", .{i}),
+                .string_literal => |e| try writer.print("{s}", .{vm.text[e.start + 1 .. e.end - 1]}),
+                .managed_string => {
+                    @panic("todo");
+                },
+                .script_function => @panic("todo"),
+                .assembly => @panic("todo"),
+                .assembly_field => @panic("todo"),
+                .class => @panic("todo"),
+                .class_member => @panic("todo"),
+                // .object => @panic("todo"),
+            }
+        }
+    }
+    try writer.writeAll("\n");
+    try writer.flush();
 }
 
 const DottedIterator = struct {
@@ -1431,6 +1478,7 @@ const Builtin = enum {
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     // temporary builtin, remove this later
     @"@Nothing",
+    @"@Log",
     @"@LogAssemblies",
     @"@Assembly",
     @"@Class",
@@ -1440,6 +1488,7 @@ const Builtin = enum {
     pub fn params(builtin: Builtin) []const BuiltinParamType {
         return switch (builtin) {
             .@"@Nothing" => &.{},
+            .@"@Log" => &.{.anything},
             .@"@LogAssemblies" => &.{},
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
             .@"@Class" => &.{.{ .concrete = .assembly_field }},
@@ -1450,6 +1499,7 @@ const Builtin = enum {
 };
 pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Nothing", .@"@Nothing" },
+    .{ "@Log", .@"@Log" },
     .{ "@LogAssemblies", .@"@LogAssemblies" },
     .{ "@Assembly", .@"@Assembly" },
     .{ "@Class", .@"@Class" },
@@ -2572,6 +2622,10 @@ const MethodNameKind = enum { id, new };
 
 pub const Error = union(enum) {
     not_implemented: [:0]const u8,
+    log_error: struct {
+        pos: usize,
+        err: std.fs.File.WriteError,
+    },
     unexpected_token: struct { expected: [:0]const u8, token: Token },
     unknown_builtin: Token,
     undefined_identifier: Extent,
@@ -2669,6 +2723,10 @@ const ErrorFmt = struct {
     pub fn format(f: *const ErrorFmt, writer: *std.Io.Writer) error{WriteFailed}!void {
         switch (f.err.*) {
             .not_implemented => |n| try writer.print("{s} not implemented", .{n}),
+            .log_error => |e| try writer.print(
+                "{d}: @Log failed with {t}",
+                .{ getLineNum(f.text, e.pos), e.err },
+            ),
             .unexpected_token => |e| try writer.print(
                 "{d}: syntax error: expected {s} but got {f}",
                 .{
@@ -3019,6 +3077,15 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\  return fib(n - 1) + fib(n - 1)
         \\}
         \\fib(10)
+    );
+    try testCode(mono_funcs, "@Log(0)");
+    try testCode(mono_funcs, "@Log(\"Hello @Log!\")");
+    try testCode(mono_funcs,
+        \\mscorlib = @Assembly("mscorlib")
+        \\Environment = @Class(mscorlib.System.Environment)
+        \\@Log(Environment.get_TickCount())
+        \\//@Log("TickCount: ", Environment.get_TickCount())
+        \\@Log(Environment.get_MachineName())
     );
     try testCode(mono_funcs,
         \\mscorlib = @Assembly("mscorlib")
