@@ -349,6 +349,37 @@ pub fn evalFunction(
     return after_close_brace;
 }
 
+pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}!usize {
+    const body_start = blk: {
+        const token = lex(vm.text, start);
+        if (token.tag != .l_brace) return vm.err.set(.{ .unexpected_token = .{
+            .expected = "an open brace '{' to start " ++ @tagName(kind) ++ " block",
+            .token = token,
+        } });
+        break :blk token.end;
+    };
+
+    const after_close_brace = blk: {
+        var offset: usize = body_start;
+        while (true) {
+            const after_statement = switch (try vm.evalStatement(offset)) {
+                .not_statement => |token| {
+                    if (token.tag == .r_brace) break :blk token.end;
+                    return vm.err.set(.{ .unexpected_token = .{
+                        .expected = "a statement",
+                        .token = token,
+                    } });
+                },
+                .statement_end => |end| end,
+            };
+            std.debug.assert(after_statement > offset);
+            offset = after_statement;
+        }
+    };
+
+    return after_close_brace;
+}
+
 fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
     not_statement: Token,
     statement_end: usize,
@@ -402,7 +433,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 break :blk token.end;
             };
             const params = try eat(vm.text, &vm.err).evalParamDeclList(arg_start);
-            const after_definition = try eat(vm.text, &vm.err).evalFunction(params.end);
+            const after_definition = try eat(vm.text, &vm.err).evalBlock(params.end, .function);
 
             try vm.startSymbol(id_extent.start);
             (try vm.push(Type)).* = .script_function;
@@ -416,8 +447,36 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 .l_paren,
                 "a '(' to start the if conditional",
             );
-            _ = after_lparen;
-            return vm.err.set(.{ .not_implemented = "if" });
+            const expr_addr = vm.mem.top();
+            const first_expr_token = lex(vm.text, after_lparen);
+            const after_expr = try vm.evalExpr(first_expr_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                .expected = "an expression inside the if conditional",
+                .token = first_expr_token,
+            } });
+            const after_rparen = try eat(vm.text, &vm.err).eatToken(
+                after_expr,
+                .r_paren,
+                "a ')' to finish the if conditional",
+            );
+            if (expr_addr.eql(vm.mem.top())) return vm.err.set(.{ .if_type = .{
+                .pos = first_expr_token.start,
+                .type = null,
+            } });
+            const is_true = blk: {
+                var value = vm.pop(expr_addr);
+                defer value.discard(vm.mono_funcs);
+                break :blk switch (value) {
+                    .integer => |int_value| int_value != 0,
+                    else => |t| return vm.err.set(.{ .if_type = .{
+                        .pos = first_expr_token.start,
+                        .type = t.getType(),
+                    } }),
+                };
+            };
+            return .{ .statement_end = blk: {
+                if (!is_true) break :blk try eat(vm.text, &vm.err).evalBlock(after_rparen, .@"if");
+                break :blk try vm.evalBlock(after_rparen, .@"if");
+            } };
         },
         .keyword_var => {
             const id_extent = blk: {
@@ -1332,11 +1391,14 @@ const VmEat = struct {
         return t.end;
     }
 
-    pub fn evalFunction(vm: VmEat, start: usize) error{Vm}!usize {
+    pub fn evalBlock(vm: VmEat, start: usize, comptime kind: enum { function, @"if" }) error{Vm}!usize {
         const body_start = blk: {
             const token = lex(vm.text, start);
             if (token.tag != .l_brace) return vm.err.set(.{ .unexpected_token = .{
-                .expected = "an open brace '{' to start function body",
+                .expected = "an open brace '{' to start " ++ switch (kind) {
+                    .function => "function body",
+                    .@"if" => "if block",
+                },
                 .token = token,
             } });
             break :blk token.end;
@@ -2972,6 +3034,7 @@ pub const Error = union(enum) {
     divide_by_0: struct {
         pos: usize,
     },
+    if_type: struct { pos: usize, type: ?Type },
     static_error: struct {
         pos: usize,
         string: [:0]const u8,
@@ -3179,6 +3242,13 @@ const ErrorFmt = struct {
                 },
             ),
             .divide_by_0 => |d| try writer.print("{d}: divide by 0", .{getLineNum(f.text, d.pos)}),
+            .if_type => |e| if (e.type) |t| try writer.print(
+                "{d}: if requires an integer but got {s}",
+                .{ getLineNum(f.text, e.pos), t.what() },
+            ) else try writer.print(
+                "{d}: if conditional expression resulted in nothing",
+                .{getLineNum(f.text, e.pos)},
+            ),
             .static_error => |e| try writer.print(
                 "{d}: {s}",
                 .{ getLineNum(f.text, e.pos), e.string },
@@ -3301,6 +3371,13 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "foo=0", "1: undefined identifier 'foo'");
     try testBadCode(mono_funcs, "fn foo(){}foo=0", "1: cannot assign an integer to identifier 'foo' which is a function");
     try testBadCode(mono_funcs, "var foo = \"hello\" foo=0", "1: cannot assign an integer to identifier 'foo' which is a string literal");
+    try testBadCode(mono_funcs, "if", "1: syntax error: expected a '(' to start the if conditional but got EOF");
+    try testBadCode(mono_funcs, "if()", "1: syntax error: expected an expression inside the if conditional but got a close paren ')'");
+    try testBadCode(mono_funcs, "if(0", "1: syntax error: expected a ')' to finish the if conditional but got EOF");
+    try testBadCode(mono_funcs, "if(@Nothing())", "1: if conditional expression resulted in nothing");
+    try testBadCode(mono_funcs, "if(\"hello\")", "1: if requires an integer but got a string literal");
+    try testBadCode(mono_funcs, "if(0)", "1: syntax error: expected an open brace '{' to start if block but got EOF");
+    try testBadCode(mono_funcs, "if(0){", "1: syntax error: expected a statement but got EOF");
 }
 
 const TestDomain = struct {
@@ -3447,11 +3524,10 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, "@Log(0 >= 0)");
     try testCode(mono_funcs, "@Log(0 == 0+1)");
     try testCode(mono_funcs, "@Log(0+1 == 0+1)");
-    if (false) try testCode(mono_funcs,
-        \\if (10 > 9) {
-        \\    @Log("Hello")
-        \\}
-    );
+    try testCode(mono_funcs, "if(0){}");
+    try testCode(mono_funcs, "if(1){}");
+    try testCode(mono_funcs, " if (0 > 1) { @Log(\"if statement!\") }");
+    try testCode(mono_funcs, " if (0 < 1) { @Log(\"if statement!\") }");
     try testCode(mono_funcs,
         \\var counter = 0
         \\fn RepeatMe() {
