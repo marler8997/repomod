@@ -3168,7 +3168,7 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "1/0", "1: divide by 0");
     try testCode(mono_funcs, "@Log(9_223_372_036_854_775_807+0)");
     try testBadCode(mono_funcs, "9_223_372_036_854_775_807+1", "1: i64 overflow from '+' operator on 9223372036854775807 and 1");
-    try testBadCode(mono_funcs, "foo=0", "");
+    try testBadCode(mono_funcs, "foo=0", "1: undefined identifier 'foo'");
 }
 
 const TestDomain = struct {
