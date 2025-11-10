@@ -313,10 +313,8 @@ pub const Yield = struct {
 };
 
 pub fn evalRoot(vm: *Vm, block_resume: BlockResume) error{Vm}!Yield {
-    // std.debug.assert(vm.mem.top().eql(.zero));
     var next_statement_offset: usize = block_resume.text_offset;
     var loop_text_offset: ?usize = block_resume.loop_text_offset;
-    _ = &loop_text_offset;
     while (true) {
         std.debug.assert(next_statement_offset <= vm.text.len);
         const new_offset = blk: switch (try vm.evalStatement(next_statement_offset, &loop_text_offset)) {

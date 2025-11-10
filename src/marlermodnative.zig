@@ -205,13 +205,15 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
 
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     while (true) {
-        var tests_scheduled: bool = false;
-        updateMods(&mono_funcs, scratch.allocator(), &tests_scheduled);
+        const update_result = updateMods(
+            &mono_funcs,
+            scratch.allocator(),
+        );
         if (!scratch.reset(.retain_capacity)) {
             std.log.warn("reset scratch allocator failed?", .{});
         }
 
-        if (tests_scheduled) {
+        if (update_result.tests_scheduled) {
             std.log.info("@ScheduleTests requested! running...", .{});
             Vm.runTests(&mono_funcs) catch |err| {
                 std.log.err("tests failed with {s}:", .{@errorName(err)});
@@ -222,9 +224,18 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
                 }
             };
         }
-        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        // std.Thread.sleep(std.time.ns_per_s * 5);
-        std.Thread.sleep(std.time.ns_per_s * 1);
+
+        // var sleep_time_ms: u64 = 5000;
+        var sleep_time_ms: u64 = 1000;
+        const now = getNow();
+        {
+            var maybe_mod = global.mods.first;
+            while (maybe_mod) |list_node| : (maybe_mod = list_node.next) {
+                const mod: *Mod = @fieldParentPtr("list_node", list_node);
+                sleep_time_ms = @min(sleep_time_ms, mod.nextYieldSleepMs(now));
+            }
+        }
+        std.Thread.sleep(sleep_time_ms);
     }
 
     // TODO: how do we call .NET methods?
@@ -258,13 +269,41 @@ const Mod = struct {
         have_text: HaveText,
     } = .initial,
 
+    const Yielded = struct {
+        time: std.time.Instant,
+        timeout_ms: u64,
+        block_resume: Vm.BlockResume,
+        pub fn isExpired(yielded: *const Yielded) bool {
+            const since_ns = getNow().since(yielded.time);
+            return @divTrunc(since_ns, std.time.ns_per_ms) >= yielded.timeout_ms;
+        }
+        pub fn nextSleepMs(yielded: *const Yielded, now: std.time.Instant) u64 {
+            const since_ns = now.since(yielded.time);
+            const since_ms = @divTrunc(since_ns, std.time.ns_per_ms);
+            if (since_ms >= yielded.timeout_ms) return 0;
+            return yielded.timeout_ms - since_ms;
+        }
+    };
+
     const HaveText = struct {
         text: []u8,
-        processed: bool,
+        vm_state: ?struct {
+            instance: Vm,
+            yielded: ?Yielded,
+        } = null,
         pub fn deinitTakeText(have_text: *HaveText) []u8 {
+            if (have_text.vm_state) |*vm_state| {
+                vm_state.instance.deinit();
+                vm_state.* = undefined;
+                have_text.vm_state = null;
+            }
             const text = have_text.text;
             have_text.* = undefined;
             return text;
+        }
+        pub fn deinitFreeText(have_text: *HaveText) void {
+            const text = have_text.deinitTakeText();
+            std.heap.page_allocator.free(text);
         }
     };
 
@@ -292,6 +331,16 @@ const Mod = struct {
         global.mods.remove(&mod.list_node);
         mod.* = undefined;
         std.heap.page_allocator.destroy(mod);
+    }
+
+    pub fn nextYieldSleepMs(mod: *const Mod, now: std.time.Instant) u64 {
+        const have_text = switch (mod.state) {
+            .initial, .err_no_text => return std.math.maxInt(u64),
+            .have_text => |h| h,
+        };
+        const vm_state = &(have_text.vm_state orelse return std.math.maxInt(u64));
+        const yielded = &(vm_state.yielded orelse return std.math.maxInt(u64));
+        return yielded.nextSleepMs(now);
     }
 
     const ErrorNoText = union(enum) {
@@ -327,10 +376,7 @@ const Mod = struct {
         switch (mod.state) {
             .initial => {},
             .err_no_text => |current_error| if (current_error.eql(err)) return,
-            .have_text => |state| {
-                std.heap.page_allocator.free(state.text);
-                mod.state = undefined;
-            },
+            .have_text => |*state| state.deinitFreeText(),
         }
         mod.logNewErrorNoText(err);
         mod.state = .{ .err_no_text = err };
@@ -343,18 +389,17 @@ const Mod = struct {
                 if (std.mem.eql(u8, state.text, new_text)) return;
                 std.log.info("mod '{s}' text updated", .{mod.name()});
                 if (std.heap.page_allocator.resize(state.text, new_text.len)) {
-                    std.log.debug("  resized!", .{});
+                    std.log.debug("  resized from {} to {}!", .{ state.text.len, new_text.len });
                     @memcpy(state.text.ptr[0..new_text.len], new_text);
                     const text = state.deinitTakeText();
                     mod.state = .{ .have_text = .{
                         .text = text.ptr[0..new_text.len],
-                        .processed = false,
+                        .vm_state = null,
                     } };
                     return;
                 }
                 std.log.debug("  can't resize", .{});
-                std.heap.page_allocator.free(state.text);
-                mod.state = undefined;
+                state.deinitFreeText();
             },
         }
         const copy = std.heap.page_allocator.dupe(u8, new_text) catch |e| switch (e) {
@@ -365,15 +410,20 @@ const Mod = struct {
             },
         };
         std.log.info("mod '{s}' source loaded", .{mod.name()});
-        mod.state = .{ .have_text = .{ .text = copy, .processed = false } };
+        mod.state = .{ .have_text = .{ .text = copy, .vm_state = null } };
     }
+};
+
+const UpdateModsResult = struct {
+    tests_scheduled: bool,
 };
 
 fn updateMods(
     mono_funcs: *const mono.Funcs,
     scratch: std.mem.Allocator,
-    run_tests_ref: *bool,
-) void {
+) UpdateModsResult {
+    var result: UpdateModsResult = .{ .tests_scheduled = false };
+
     {
         var maybe_mod = global.mods.first;
         while (maybe_mod) |list_node| : (maybe_mod = list_node.next) {
@@ -386,13 +436,13 @@ fn updateMods(
     if (false) std.log.info("loading mods from '{s}'...", .{mod_path});
     var dir = std.fs.cwd().openDir(mod_path, .{ .iterate = true }) catch |err| {
         std.log.err("open mod directory '{s}' failed with {s}", .{ mod_path, @errorName(err) });
-        return;
+        return result;
     };
     defer dir.close();
     var it = dir.iterate();
     while (it.next() catch |err| {
         std.log.err("iterate mod directory '{s}' failed with {s}", .{ mod_path, @errorName(err) });
-        return;
+        return result;
     }) |entry| {
         if (entry.kind != .file) continue;
         const mod_name_len: u8 = std.math.cast(u8, entry.name.len) orelse {
@@ -436,25 +486,7 @@ fn updateMods(
 
         switch (mod.state) {
             .initial, .err_no_text => {},
-            .have_text => |*state| if (!state.processed) {
-                var vm: Vm = .{
-                    .mono_funcs = mono_funcs,
-                    .text = state.text,
-                    .mem = .{ .allocator = scratch },
-                };
-                defer vm.deinit();
-                if (vm.evalRoot(0)) |yield| {
-                    std.log.err("TODO: implement yield {}", .{yield});
-                } else |_| switch (vm.error_result) {
-                    .exit => {},
-                    .err => |err| {
-                        std.log.err("{s}:{f}", .{ mod.name(), err.fmt(state.text) });
-                    },
-                }
-                run_tests_ref.* = run_tests_ref.* or vm.tests_scheduled;
-                // TODO: call vm.verifyStack?
-                state.processed = true;
-            },
+            .have_text => |*h| runMod(mono_funcs, &result, mod.name(), h),
         }
     }
 
@@ -462,6 +494,70 @@ fn updateMods(
         std.log.info("deleting mod '{s}'", .{mod.name()});
         mod.delete();
     }
+    return result;
+}
+
+fn runMod(
+    mono_funcs: *const mono.Funcs,
+    update_mods_result: *UpdateModsResult,
+    mod_name: []const u8,
+    have_text: *Mod.HaveText,
+) void {
+    const Eval = struct {
+        vm: *Vm,
+        block_resume: Vm.BlockResume,
+    };
+
+    const maybe_eval: ?Eval = blk: {
+        if (have_text.vm_state) |*vm_state| {
+            if (vm_state.yielded) |*yielded| {
+                if (yielded.isExpired()) {
+                    std.log.info("{s}: yield expired!", .{mod_name});
+                    const block_resume = yielded.block_resume;
+                    vm_state.yielded = null;
+                    break :blk .{
+                        .vm = &vm_state.instance,
+                        .block_resume = block_resume,
+                    };
+                }
+            }
+            break :blk null;
+        } else {
+            have_text.vm_state = .{
+                .yielded = null,
+                .instance = .{
+                    .mono_funcs = mono_funcs,
+                    .text = have_text.text,
+                    .mem = .{ .allocator = std.heap.page_allocator },
+                },
+            };
+            break :blk .{
+                .vm = &have_text.vm_state.?.instance,
+                .block_resume = .{},
+            };
+        }
+    };
+    if (maybe_eval) |eval| {
+        if (eval.vm.evalRoot(eval.block_resume)) |yield| {
+            // TODO: call vm.verifyStack?
+            update_mods_result.tests_scheduled = update_mods_result.tests_scheduled or eval.vm.tests_scheduled;
+            eval.vm.tests_scheduled = false;
+            have_text.vm_state.?.yielded = .{
+                .time = getNow(),
+                .timeout_ms = if (yield.millis < 0) 0 else @intCast(yield.millis),
+                .block_resume = yield.block_resume,
+            };
+        } else |_| switch (eval.vm.error_result) {
+            .exit => std.log.info("{s} has exited", .{mod_name}),
+            .err => |err| {
+                std.log.err("{s}:{f}", .{ mod_name, err.fmt(have_text.text) });
+            },
+        }
+    }
+}
+
+fn getNow() std.time.Instant {
+    return std.time.Instant.now() catch unreachable;
 }
 
 fn findStaleMod() ?*Mod {
