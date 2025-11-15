@@ -44,7 +44,10 @@ pub fn main() !void {
         },
         else => |e| return e,
     };
-    switch (kind) {
+    const mutiny_dll_path_w = try std.unicode.wtf8ToWtf16LeAllocZ(gpa, mutiny_dll_path);
+    defer gpa.free(mutiny_dll_path_w);
+
+    const process: ProcessResult = blk: switch (kind) {
         .pid => |pid| {
             errExit("todo: attach to pid {}", .{pid});
         },
@@ -60,10 +63,29 @@ pub fn main() !void {
             std.log.info("launching '{s}'...", .{exe.path});
             const exe_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, exe.path);
             defer gpa.free(exe_w);
-            try launchAndInject(gpa, exe_w, mutiny_dll_path);
-            std.log.info("success", .{});
+            break :blk try createProcess(exe_w);
         },
+    };
+    defer win32.closeHandle(process.process);
+
+    const inject_dll = true;
+    if (inject_dll) injectDLL(process.process, mutiny_dll_path_w) catch |err| {
+        _ = win32.TerminateProcess(process.process, 1);
+        return err;
+    };
+
+    if (process.maybe_suspended_thread) |thread| {
+        defer win32.closeHandle(thread);
+        std.log.info("resuming new process thread...", .{});
+        const suspend_count = win32.ResumeThread(thread);
+        if (suspend_count == -1) std.debug.panic(
+            "ResumeThread failed, error={}",
+            .{win32.GetLastError()},
+        );
+        std.log.info("process thread resumed (suspend_count={})", .{suspend_count});
     }
+
+    std.log.info("success", .{});
 }
 
 fn getDirname(path: []const u16) ?[]const u16 {
@@ -74,16 +96,12 @@ fn getDirname(path: []const u16) ?[]const u16 {
     return null;
 }
 
-fn launchAndInject(
-    gpa: std.mem.Allocator,
-    game_exe: [:0]const u16,
-    dll_path: []const u8,
-) !void {
-    const dll_path_w = try std.unicode.wtf8ToWtf16LeAllocZ(gpa, dll_path);
-    defer gpa.free(dll_path_w);
+const ProcessResult = struct {
+    process: win32.HANDLE,
+    maybe_suspended_thread: ?win32.HANDLE,
+};
 
-    std.log.info("Init Thread running!", .{});
-
+fn createProcess(game_exe: [:0]const u16) !ProcessResult {
     const stdout_path = win32.L("C:\\temp\\mutiny-stdout.log");
     const stderr_path = win32.L("C:\\temp\\mutiny-stderr.log");
 
@@ -191,20 +209,10 @@ fn launchAndInject(
     if (result == 0) win32.panicWin32("CreateProcess", win32.GetLastError());
 
     std.log.info("created game process (pid {})", .{pi.dwProcessId});
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    const inject_dll = true;
-    if (inject_dll) injectDLL(pi.hProcess.?, dll_path_w) catch |err| {
-        _ = win32.TerminateProcess(pi.hProcess, 1);
-        return err;
+    return .{
+        .process = pi.hProcess.?,
+        .maybe_suspended_thread = pi.hThread.?,
     };
-
-    // Resume the process
-    _ = win32.ResumeThread(pi.hThread);
-    std.log.info("Process resumed", .{});
-
-    // Close handles
-    _ = win32.CloseHandle(pi.hProcess);
-    _ = win32.CloseHandle(pi.hThread);
 }
 
 fn injectDLL(process: win32.HANDLE, dll_path: [:0]const u16) !void {

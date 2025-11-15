@@ -194,6 +194,11 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         }
     };
 
+    // if we go to fast the process will intermittently crash
+    // TODO: find a better way to do this, might need to inspect mono source to find it
+    std.log.info("waiting a second for main process to initialize mono...", .{});
+    std.Thread.sleep(std.time.ns_per_s * 1);
+
     // sanity check, this should be null before we call thread_attach
     std.debug.assert(mono_funcs.domain_get() == null);
 

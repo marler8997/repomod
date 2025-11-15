@@ -80,27 +80,27 @@ fn WindowProc(hwnd: win32.HWND, msg: u32, wParam: win32.WPARAM, lParam: win32.LP
             defer win32.endPaint(hwnd, &ps);
             win32.fillRect(hdc, ps.rcPaint, @ptrFromInt(@intFromEnum(win32.COLOR_WINDOW) + 1));
 
-            var y: i32 = 20;
-            win32.textOutA(hdc, 20, y, "TestGame with Mono Runtime");
-            y += 25;
+            var row: i32 = 0;
+            lineOutFmt(hdc, row, "PID {}", .{win32.GetCurrentProcessId()});
+            row += 1;
             switch (global.mono_state) {
                 .uninitialized => {
-                    lineOut(hdc, 0, "Mono not initialized.");
+                    lineOut(hdc, row, "Mono not initialized.");
                 },
                 .mod_not_found => {
-                    lineOut(hdc, 0, "Mono module not found.");
-                    lineOut(hdc, 1, "Make sure mono-2.0-bdwgc.dll is in the same directory or in PATH.");
+                    lineOut(hdc, row, "Mono module not found.");
+                    lineOut(hdc, row + 1, "Make sure mono-2.0-bdwgc.dll is in the same directory or in PATH.");
                 },
                 .init_failed => |f| {
                     switch (f.reason) {
-                        .proc_not_found => |name| lineOutFmt(hdc, 0, "mono missing function '{s}'", .{name}),
-                        .mono_jit_init => lineOut(hdc, 0, "mono_jit_init failed"),
+                        .proc_not_found => |name| lineOutFmt(hdc, row, "mono missing function '{s}'", .{name}),
+                        .mono_jit_init => lineOut(hdc, row, "mono_jit_init failed"),
                     }
-                    lineOutFmt(hdc, 1, "DLL '{f}'", .{fmtW(f.dll_string)});
+                    lineOutFmt(hdc, row + 1, "DLL '{f}'", .{fmtW(f.dll_string)});
                 },
                 .loaded => |loaded| {
-                    lineOut(hdc, 0, "Mono Loaded.");
-                    lineOutFmt(hdc, 1, "DLL '{f}'", .{fmtW(loaded.dll_string)});
+                    lineOut(hdc, row, "Mono Loaded.");
+                    lineOutFmt(hdc, row + 1, "DLL '{f}'", .{fmtW(loaded.dll_string)});
                 },
             }
             return 0;
