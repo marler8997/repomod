@@ -796,6 +796,17 @@ fn evalExprSuffix(
                             .id_extent = id_extent,
                         } });
                         switch (vm.mono_funcs.type_get_type(vm.mono_funcs.field_get_type(field))) {
+                            .class => {
+                                var value: *mono.Object = undefined;
+                                vm.mono_funcs.field_static_get_value(
+                                    vm.mono_funcs.class_vtable(vm.mono_funcs.domain_get().?, class),
+                                    field,
+                                    @ptrCast(&value),
+                                );
+                                // TODO: make sure the object is valid?
+                                (try vm.push(Type)).* = .integer;
+                                (try vm.push(*const mono.Object)).* = value;
+                            },
                             .i4 => {
                                 var value: i32 = undefined;
                                 vm.mono_funcs.field_static_get_value(
@@ -808,7 +819,10 @@ fn evalExprSuffix(
                             },
                             else => |kind| {
                                 std.debug.print("todo: field type kind={t}\n", .{kind});
-                                return vm.setError(.{ .not_implemented = "class field of this type" });
+                                return vm.setError(.{ .not_implemented2 = .{
+                                    .pos = expr_first_token.start,
+                                    .msg = "class field of this type",
+                                } });
                             },
                         }
                     } else {
@@ -3265,6 +3279,10 @@ const MethodNameKind = enum { id, new };
 
 pub const Error = union(enum) {
     not_implemented: [:0]const u8,
+    not_implemented2: struct {
+        pos: usize,
+        msg: [:0]const u8,
+    },
     assert: usize,
     log_error: struct {
         pos: usize,
@@ -3397,6 +3415,10 @@ const ErrorFmt = struct {
     pub fn format(f: *const ErrorFmt, writer: *std.Io.Writer) error{WriteFailed}!void {
         switch (f.err.*) {
             .not_implemented => |n| try writer.print("{s} not implemented", .{n}),
+            .not_implemented2 => |e| try writer.print(
+                "{d}: {s} not implemented",
+                .{ getLineNum(f.text, e.pos), e.msg },
+            ),
             .assert => |e| try writer.print("{d}: assert", .{getLineNum(f.text, e)}),
             .log_error => |e| try writer.print(
                 "{d}: @Log failed with {t}",
