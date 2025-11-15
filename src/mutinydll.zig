@@ -27,7 +27,7 @@ pub fn panic(
         if (std.fmt.bufPrintZ(&buf, "{s}", .{msg})) |msg_z| {
             _ = win32.MessageBoxA(null, msg_z, "Mutiny Panic", .{});
         } else |_| {
-            _ = win32.MessageBoxA(null, "message too long", "MarlerMod Panic", .{});
+            _ = win32.MessageBoxA(null, "message too long", "Mutiny.dll Panic", .{});
         }
     }
     // can't call this, results in:
@@ -71,14 +71,14 @@ pub export fn _DllMainCRTStartup(
         win32.DLL_PROCESS_ATTACH => {
             // !!! WARNING !!! do not log here...logging uses APIs that we probably
             // aren't supposed to call at this phase.
-            if (false) win32.OutputDebugStringW(win32.L("MarlerMod: proces attach\n"));
+            if (false) win32.OutputDebugStringW(win32.L("mutiny: proces attach\n"));
 
             // NOTE: the default thread stack size when specyfing 0 is too small when
             //       injecting into .NET asemblies, so, let' just ask for a reasonable 2MB
             //       no matter what.
             const thread_stack_size = 2 * 1024 * 1024;
             const thread = win32.CreateThread(null, thread_stack_size, initThreadEntry, null, .{}, null) orelse {
-                win32.OutputDebugStringW(win32.L("MarlerMod: CreateThread failed"));
+                win32.OutputDebugStringW(win32.L("mutiny: CreateThread failed"));
                 // TODO: how can we log the error code?
                 return 1; // fail
             };
@@ -243,22 +243,6 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         std.Thread.sleep(sleep_time_ms);
     }
 
-    // TODO: how do we call .NET methods?
-
-    // At this point we're running inside the game process
-    // But we can't directly call Unity APIs yet - we need to hook into
-    // the game's main thread
-
-    // For now, just log success and prepare for the C# side to take over
-    // In a full implementation, we would:
-    // 1. Find the Mono/IL2CPP runtime
-    // 2. Load our managed DLL (ScriptEngine.dll)
-    // 3. Call into C# to set up the rest
-
-    // std.log.info("Native initialization complete", .{});
-    // std.log.info("TODO: Hook into Mono runtime and load managed DLL", .{});
-
-    // _ = msgbox(.{}, "MarlerMod Init Thread", "InitThread running!", .{});
     return 0;
 }
 
@@ -437,7 +421,7 @@ fn updateMods(
         }
     }
 
-    const mod_path = "C:\\temp\\marlermods";
+    const mod_path = "C:\\temp\\mutinymods";
     if (false) std.log.info("loading mods from '{s}'...", .{mod_path});
     var dir = std.fs.cwd().openDir(mod_path, .{ .iterate = true }) catch |err| {
         std.log.err("open mod directory '{s}' failed with {s}", .{ mod_path, @errorName(err) });

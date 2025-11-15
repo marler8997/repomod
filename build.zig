@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
         mutiny_managed_dll,
         "MutinyManaged.dll",
     );
+    b.step("managed-dll", "").dependOn(&install_mutiny_managed_dll.step);
 
     const mutiny_native_dll = b.addLibrary(.{
         .name = "Mutiny",
