@@ -6,6 +6,7 @@ pub const Image = opaque {};
 pub const Class = opaque {};
 pub const Method = opaque {};
 pub const MethodSignature = opaque {};
+pub const VTable = opaque {};
 pub const ClassField = opaque {};
 pub const Type = opaque {};
 pub const Object = opaque {};
@@ -27,11 +28,13 @@ pub const Funcs = struct {
     assembly_name_get_name: *const fn (*const AssemblyName) callconv(.c) ?[*:0]const u8,
 
     class_from_name: *const fn (*const Image, namespace: [*:0]const u8, name: [*:0]const u8) callconv(.c) ?*const Class,
+    class_vtable: *const fn (*const Domain, *const Class) callconv(.c) *const VTable,
     class_get_method_from_name: *const fn (*const Class, [*:0]const u8, param_count: c_int) callconv(.c) ?*const Method,
     class_get_field_from_name: *const fn (*const Class, [*:0]const u8) callconv(.c) ?*const ClassField,
 
     field_get_flags: *const fn (*const ClassField) callconv(.c) ClassFieldFlags,
     field_get_type: *const fn (*const ClassField) callconv(.c) *const Type,
+    field_static_get_value: *const fn (*const VTable, *const ClassField, out_value: *anyopaque) callconv(.c) void,
     field_get_value: *const fn (?*const Object, *const ClassField, out_value: *anyopaque) callconv(.c) void,
 
     method_get_flags: *const fn (*const Method, iflags: ?*MethodFlags) callconv(.c) MethodFlags,
@@ -67,10 +70,12 @@ pub const Funcs = struct {
             .assembly_get_image = try monoload.get(mod, .assembly_get_image, proc_ref),
             .assembly_name_get_name = try monoload.get(mod, .assembly_name_get_name, proc_ref),
             .class_from_name = try monoload.get(mod, .class_from_name, proc_ref),
+            .class_vtable = try monoload.get(mod, .class_vtable, proc_ref),
             .class_get_method_from_name = try monoload.get(mod, .class_get_method_from_name, proc_ref),
             .class_get_field_from_name = try monoload.get(mod, .class_get_field_from_name, proc_ref),
             .field_get_flags = try monoload.get(mod, .field_get_flags, proc_ref),
             .field_get_type = try monoload.get(mod, .field_get_type, proc_ref),
+            .field_static_get_value = try monoload.get(mod, .field_static_get_value, proc_ref),
             .field_get_value = try monoload.get(mod, .field_get_value, proc_ref),
             .method_signature = try monoload.get(mod, .method_signature, proc_ref),
             .method_get_flags = try monoload.get(mod, .method_get_flags, proc_ref),

@@ -21,10 +21,12 @@ pub const funcs: mono.Funcs = .{
     .assembly_get_image = mock_assembly_get_image,
     .assembly_name_get_name = mock_assembly_name_get_name,
     .class_from_name = mock_class_from_name,
+    .class_vtable = mock_class_vtable,
     .class_get_method_from_name = mock_class_get_method_from_name,
     .class_get_field_from_name = mock_class_get_field_from_name,
     .field_get_flags = mock_field_get_flags,
     .field_get_type = mock_field_get_type,
+    .field_static_get_value = mock_field_static_get_value,
     .field_get_value = mock_field_get_value,
     .method_get_flags = mock_method_get_flags,
     .method_signature = mock_method_signature,
@@ -394,6 +396,11 @@ fn mock_class_from_name(
         if (std.mem.eql(u8, class.name, wanted_name)) return class.toMono();
     } else null;
 }
+fn mock_class_vtable(domain: *const mono.Domain, class: *const mono.Class) callconv(.c) *const mono.VTable {
+    _ = domain;
+    _ = class;
+    @panic("todo");
+}
 fn mock_class_get_method_from_name(
     c: *const mono.Class,
     name_ptr: [*:0]const u8,
@@ -442,6 +449,21 @@ fn mock_field_get_flags(f: *const mono.ClassField) callconv(.c) mono.ClassFieldF
 fn mock_field_get_type(f: *const mono.ClassField) callconv(.c) *const mono.Type {
     const field: *const MockClassField = .fromMono(f);
     return field.kind.getType().toMono();
+}
+fn mock_field_static_get_value(
+    vtable: *const mono.VTable,
+    f: *const mono.ClassField,
+    out_value: *anyopaque,
+) callconv(.c) void {
+    _ = vtable;
+    const field: *const MockClassField = .fromMono(f);
+    switch (field.kind) {
+        .static => |*static_value| switch (static_value.*) {
+            .i4 => |value| @as(*i32, @ptrCast(@alignCast(out_value))).* = value,
+            // else => |kind| std.debug.panic("todo: implement field_get_value for type kind '{s}'", .{@tagName(kind)}),
+        },
+        .instance => @panic("cannot call field_get_value for non-static field, MONO crashes in this case"),
+    }
 }
 fn mock_field_get_value(
     maybe_obj: ?*const mono.Object,
