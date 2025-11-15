@@ -160,11 +160,17 @@ const MockClass = struct {
     name: [:0]const u8,
     methods: []const MockMethod,
     fields: []const MockClassField,
-    pub fn fromMono(class: *const mono.Class) *const MockClass {
+    pub fn fromMonoClass(class: *const mono.Class) *const MockClass {
         return @ptrCast(@alignCast(class));
     }
-    pub fn toMono(class: *const MockClass) *const mono.Class {
+    pub fn toMonoClass(class: *const MockClass) *const mono.Class {
         return @ptrCast(class);
+    }
+    pub fn fromMonoVTable(vtable: *const mono.VTable) *const MockClass {
+        return @ptrCast(@alignCast(vtable));
+    }
+    pub fn toMonoVTable(vtable: *const MockClass) *const mono.VTable {
+        return @ptrCast(vtable);
     }
 };
 const MockMethod = struct {
@@ -393,20 +399,20 @@ fn mock_class_from_name(
     } else return null;
 
     return for (namespace.classes) |*class| {
-        if (std.mem.eql(u8, class.name, wanted_name)) return class.toMono();
+        if (std.mem.eql(u8, class.name, wanted_name)) return class.toMonoClass();
     } else null;
 }
-fn mock_class_vtable(domain: *const mono.Domain, class: *const mono.Class) callconv(.c) *const mono.VTable {
+fn mock_class_vtable(domain: *const mono.Domain, c: *const mono.Class) callconv(.c) *const mono.VTable {
     _ = domain;
-    _ = class;
-    @panic("todo");
+    const class: *const MockClass = .fromMonoClass(c);
+    return class.toMonoVTable();
 }
 fn mock_class_get_method_from_name(
     c: *const mono.Class,
     name_ptr: [*:0]const u8,
     param_count: c_int,
 ) callconv(.c) ?*const mono.Method {
-    const class: *const MockClass = .fromMono(c);
+    const class: *const MockClass = .fromMonoClass(c);
     const name = std.mem.span(name_ptr);
     for (class.methods) |*method| {
         if (method.impl.sig().param_count != param_count) continue;
@@ -418,7 +424,7 @@ fn mock_class_get_field_from_name(
     c: *const mono.Class,
     name_ptr: [*:0]const u8,
 ) callconv(.c) ?*const mono.ClassField {
-    const class: *const MockClass = .fromMono(c);
+    const class: *const MockClass = .fromMonoClass(c);
     const name = std.mem.span(name_ptr);
     for (class.fields) |*field| {
         if (std.mem.eql(u8, field.name, name)) return field.toMono();

@@ -3934,7 +3934,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Int32 = @Class(mscorlib.System.Int32)
-        \\//@Assert(2147483647 == Int32.MaxValue)
+        \\@Assert(2147483647 == Int32.MaxValue)
     );
 }
 
