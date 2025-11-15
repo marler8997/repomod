@@ -37,7 +37,9 @@ pub fn main() !void {
         } };
         errExit("expected 'pid' or 'exe' cmdline arg but got '{s}'", .{kind_string});
     };
-    std.fs.accessAbsolute(mutiny_dll_path, .{}) catch |err| switch (err) {
+    // TODO: should we enforce that the DLL path is absolute so that it guarantees it isn't
+    //       overriden by something else?
+    std.fs.cwd().access(mutiny_dll_path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             std.log.err("mutiny dll '{s}' not found", .{mutiny_dll_path});
             std.process.exit(0xff);
@@ -49,7 +51,16 @@ pub fn main() !void {
 
     const process: ProcessResult = blk: switch (kind) {
         .pid => |pid| {
-            errExit("todo: attach to pid {}", .{pid});
+            const process = win32.OpenProcess(
+                .{
+                    .VM_OPERATION = 1, // Required for VirtualAllocEx/VirtualFreeEx
+                    .VM_WRITE = 1, // Required for WriteProcessMemory
+                    .CREATE_THREAD = 1, // Required for CreateRemoteThread
+                },
+                0, // do not inherit handle,
+                pid,
+            ) orelse errExit("OpenProcess pid {} failed, error={f}", .{ pid, win32.GetLastError() });
+            break :blk .{ .created = false, .pid = pid, .process = process, .maybe_suspended_thread = null };
         },
         .exe => |exe| {
             if (exe.args.len > 0) @panic("TODO: support extra exe cmdline args");
@@ -66,16 +77,22 @@ pub fn main() !void {
             break :blk try createProcess(exe_w);
         },
     };
-    defer win32.closeHandle(process.process);
+    defer process.deinit();
+    errdefer {
+        if (process.created) {
+            std.log.info("terminating process {}", .{process.pid});
+            if (0 == win32.TerminateProcess(process.process, 1)) {
+                std.log.err("TerminateProcess {} failed, error={}", .{ process.pid, win32.GetLastError() });
+            }
+        }
+    }
 
     const inject_dll = true;
     if (inject_dll) injectDLL(process.process, mutiny_dll_path_w) catch |err| {
-        _ = win32.TerminateProcess(process.process, 1);
         return err;
     };
 
     if (process.maybe_suspended_thread) |thread| {
-        defer win32.closeHandle(thread);
         std.log.info("resuming new process thread...", .{});
         const suspend_count = win32.ResumeThread(thread);
         if (suspend_count == -1) std.debug.panic(
@@ -97,8 +114,16 @@ fn getDirname(path: []const u16) ?[]const u16 {
 }
 
 const ProcessResult = struct {
+    created: bool,
+    pid: u32,
     process: win32.HANDLE,
     maybe_suspended_thread: ?win32.HANDLE,
+    pub fn deinit(result: *const ProcessResult) void {
+        if (result.maybe_suspended_thread) |t| {
+            win32.closeHandle(t);
+        }
+        defer win32.closeHandle(result.process);
+    }
 };
 
 fn createProcess(game_exe: [:0]const u16) !ProcessResult {
@@ -207,9 +232,10 @@ fn createProcess(game_exe: [:0]const u16) !ProcessResult {
         &pi,
     );
     if (result == 0) win32.panicWin32("CreateProcess", win32.GetLastError());
-
     std.log.info("created game process (pid {})", .{pi.dwProcessId});
     return .{
+        .created = true,
+        .pid = pi.dwProcessId,
         .process = pi.hProcess.?,
         .maybe_suspended_thread = pi.hThread.?,
     };
