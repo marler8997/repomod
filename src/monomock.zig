@@ -353,18 +353,6 @@ const assemblies = [_]MockAssembly{
             } },
         },
     } },
-    // .{ .name = .{ .cstr = "ExAssembly" }, .image = .{
-    //     .namespaces = &[_]Namespace{
-    //         .{ .prefix = "ExNs", .classes = &[_]MockClass{
-    //             .{ .name = "ExClass", .methods = &[_]MockMethod{
-    //                 .{ .name = "ExMethod", .sig = .{
-    //                     .return_type = .{ .kind = .void },
-    //                     .param_count = 0,
-    //                 } },
-    //             } },
-    //         } },
-    //     },
-    // } },
 };
 
 fn mock_assembly_foreach(func: *const mono.Callback, user_data: ?*anyopaque) callconv(.c) void {
