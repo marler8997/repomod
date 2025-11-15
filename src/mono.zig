@@ -6,6 +6,7 @@ pub const Image = opaque {};
 pub const Class = opaque {};
 pub const Method = opaque {};
 pub const MethodSignature = opaque {};
+pub const ClassField = opaque {};
 pub const Type = opaque {};
 pub const Object = opaque {};
 pub const GcHandle = enum(u32) { _ };
@@ -27,6 +28,7 @@ pub const Funcs = struct {
 
     class_from_name: *const fn (*const Image, namespace: [*:0]const u8, name: [*:0]const u8) callconv(.c) ?*const Class,
     class_get_method_from_name: *const fn (*const Class, [*:0]const u8, param_count: c_int) callconv(.c) ?*const Method,
+    class_get_field_from_name: *const fn (*const Class, [*:0]const u8) callconv(.c) ?*const ClassField,
 
     method_get_flags: *const fn (*const Method, iflags: ?*MethodFlags) callconv(.c) MethodFlags,
     method_signature: *const fn (*const Method) callconv(.c) ?*const MethodSignature,
@@ -62,6 +64,7 @@ pub const Funcs = struct {
             .assembly_name_get_name = try monoload.get(mod, .assembly_name_get_name, proc_ref),
             .class_from_name = try monoload.get(mod, .class_from_name, proc_ref),
             .class_get_method_from_name = try monoload.get(mod, .class_get_method_from_name, proc_ref),
+            .class_get_field_from_name = try monoload.get(mod, .class_get_field_from_name, proc_ref),
             .method_signature = try monoload.get(mod, .method_signature, proc_ref),
             .method_get_flags = try monoload.get(mod, .method_get_flags, proc_ref),
             .method_get_class = try monoload.get(mod, .method_get_class, proc_ref),

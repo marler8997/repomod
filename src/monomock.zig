@@ -22,6 +22,7 @@ pub const funcs: mono.Funcs = .{
     .assembly_name_get_name = mock_assembly_name_get_name,
     .class_from_name = mock_class_from_name,
     .class_get_method_from_name = mock_class_get_method_from_name,
+    .class_get_field_from_name = mock_class_get_field_from_name,
     .method_get_flags = mock_method_get_flags,
     .method_signature = mock_method_signature,
     .method_get_class = mock_method_get_class,
@@ -153,6 +154,7 @@ const MockAssemblyName = struct {
 const MockClass = struct {
     name: [:0]const u8,
     methods: []const MockMethod,
+    fields: []const MockClassField,
     pub fn fromMono(class: *const mono.Class) *const MockClass {
         return @ptrCast(@alignCast(class));
     }
@@ -170,6 +172,16 @@ const MockMethod = struct {
         return @ptrCast(method);
     }
 };
+const MockClassField = struct {
+    name: [:0]const u8,
+    value: MockValue,
+    pub fn fromMono(class_field: *const mono.ClassField) *const MockClassField {
+        return @ptrCast(@alignCast(class_field));
+    }
+    pub fn toMono(class_field: *const MockClassField) *const mono.ClassField {
+        return @ptrCast(class_field);
+    }
+};
 
 const MethodImpl = union(enum) {
     return_void: *const fn () void,
@@ -180,6 +192,10 @@ const MethodImpl = union(enum) {
             inline else => |_, tag| &@field(method_sigs, @tagName(tag)),
         };
     }
+};
+
+const MockValue = union(enum) {
+    i4: i32,
 };
 
 const types = struct {
@@ -290,15 +306,18 @@ const assemblies = [_]MockAssembly{
     .{ .name = .{ .cstr = "mscorlib" }, .image = .{
         .namespaces = &[_]Namespace{
             .{ .prefix = "System", .classes = &[_]MockClass{
+                .{ .name = "Int32", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{
+                    .{ .name = "MaxValue", .value = .{ .i4 = std.math.maxInt(i32) } },
+                } },
                 .{ .name = "Console", .methods = &[_]MockMethod{
                     .{ .name = "WriteLine", .impl = .{ .return_void = &@"System.Console.WriteLine0" } },
                     .{ .name = "Beep", .impl = .{ .return_void = &@"System.Console.Beep" } },
-                } },
+                }, .fields = &[_]MockClassField{} },
                 .{ .name = "Environment", .methods = &[_]MockMethod{
                     .{ .name = "get_TickCount", .impl = .{ .return_i4 = &@"System.Environment.get_TickCount" } },
                     .{ .name = "get_MachineName", .impl = .{ .return_static_string = &@"System.Environment.get_MachineName" } },
-                } },
-                .{ .name = "Object", .methods = &[_]MockMethod{} },
+                }, .fields = &[_]MockClassField{} },
+                .{ .name = "Object", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{} },
             } },
         },
     } },
@@ -361,6 +380,17 @@ fn mock_class_get_method_from_name(
     for (class.methods) |*method| {
         if (method.impl.sig().param_count != param_count) continue;
         if (std.mem.eql(u8, method.name, name)) return method.toMono();
+    }
+    return null;
+}
+fn mock_class_get_field_from_name(
+    c: *const mono.Class,
+    name_ptr: [*:0]const u8,
+) callconv(.c) ?*const mono.ClassField {
+    const class: *const MockClass = .fromMono(c);
+    const name = std.mem.span(name_ptr);
+    for (class.fields) |*field| {
+        if (std.mem.eql(u8, field.name, name)) return field.toMono();
     }
     return null;
 }

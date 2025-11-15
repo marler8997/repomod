@@ -49,7 +49,7 @@ const Type = enum {
     assembly,
     assembly_field,
     class,
-    class_member,
+    class_method,
     object,
     pub fn what(t: Type) []const u8 {
         return switch (t) {
@@ -61,7 +61,7 @@ const Type = enum {
             .assembly => "an assembly",
             .assembly_field => "an assembly field",
             .class => "a class",
-            .class_member => "a class member",
+            .class_method => "a class method",
             .object => "an object",
         };
     }
@@ -78,7 +78,7 @@ const Type = enum {
             .assembly => false, // not sure if this should work or not
             .assembly_field => false, // not sure if this should work or not
             .class => false, // TODO
-            .class_member => false, // TODO
+            .class_method => false, // TODO
             .object => false, // TODO
         };
     }
@@ -740,6 +740,7 @@ fn evalExprSuffix(
                 // .c_string,
                 .managed_string,
                 .script_function,
+                .class_method,
                 => vm.setError(.{ .no_field = .{
                     .start = suffix_op_token.start,
                     .field = id_extent,
@@ -775,13 +776,21 @@ fn evalExprSuffix(
                     return id_extent.end;
                 },
                 .class => {
-                    expr_type_ptr.* = .class_member;
+                    const class, const end = vm.readValue(*const mono.Class, value_addr);
+                    std.debug.assert(end.eql(vm.mem.top()));
+                    const name = try vm.managedId(id_extent);
+
+                    if (vm.mono_funcs.class_get_field_from_name(class, name.slice())) |field| {
+                        _ = field;
+                        return vm.setError(.{ .not_implemented = "class fields" });
+                    }
+
+                    // if it's not a field, then we'll assume it's a method
+                    // TODO: should we lookup the method or just assume it must be a method?
+                    expr_type_ptr.* = .class_method;
                     // class already pushed
                     (try vm.push(usize)).* = id_extent.start;
                     return id_extent.end;
-                },
-                .class_member => {
-                    return vm.setError(.{ .not_implemented = "class member" });
                 },
                 .object => vm.setError(.{ .not_implemented = "object fields" }),
             };
@@ -792,7 +801,7 @@ fn evalExprSuffix(
                 .unexpected_type = null,
             } });
             switch (vm.pop(expr_addr)) {
-                .class_member => |member| {
+                .class_method => |member| {
                     const method_id_extent = blk: {
                         var it: DottedIterator = .init(vm.text, member.id_start);
                         var previous = it.id;
@@ -994,11 +1003,13 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             const class_ptr = vm.mem.toPointer(*const mono.Class, value_addr);
             (try vm.push(*const mono.Class)).* = class_ptr.*;
         },
-        .class_member => {
-            (try vm.push(Type)).* = .class_member;
-            // const class_ptr = vm.mem.toPointer(*const mono.Class, value_addr);
-            // (try vm.push(*const mono.Class)).* = class_ptr.*;
-            return vm.setError(.{ .not_implemented = "pushValueFromAddr class_member" });
+        .class_method => {
+            const class, const id_start_addr = vm.readValue(*const mono.Class, value_addr);
+            const id_start = vm.mem.toPointer(usize, id_start_addr).*;
+            // TODO: should we verify id_start?
+            (try vm.push(Type)).* = .class_method;
+            (try vm.push(*const mono.Class)).* = class;
+            (try vm.push(usize)).* = id_start;
         },
         .object => {
             (try vm.push(Type)).* = .object;
@@ -1374,7 +1385,7 @@ fn log(vm: *Vm, writer: *std.Io.Writer, args_addr: Memory.Addr) error{WriteFaile
                 .assembly => try writer.print("<assembly>", .{}),
                 .assembly_field => try writer.print("<assembly-field>", .{}),
                 .class => try writer.print("<class>", .{}),
-                .class_member => try writer.print("<class-member", .{}),
+                .class_method => try writer.print("<class-method>", .{}),
             }
         }
     }
@@ -1491,13 +1502,10 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
             const class, const end = vm.readValue(*const mono.Class, addr);
             return .{ .{ .class = class }, end };
         },
-        .class_member => {
+        .class_method => {
             const class, const id_start_addr = vm.readValue(*const mono.Class, addr);
             const id_start, const end = vm.readValue(usize, id_start_addr);
-            return .{ .{ .class_member = .{
-                .class = class,
-                .id_start = id_start,
-            } }, end };
+            return .{ .{ .class_method = .{ .class = class, .id_start = id_start } }, end };
         },
         .object => @panic("implement readValue2 for object"),
     }
@@ -1534,7 +1542,7 @@ const Value = union(enum) {
         id_start: usize,
     },
     class: *const mono.Class,
-    class_member: struct {
+    class_method: struct {
         class: *const mono.Class,
         id_start: usize,
     },
@@ -1548,7 +1556,7 @@ const Value = union(enum) {
             .assembly => {},
             .assembly_field => {},
             .class => {},
-            .class_member => {},
+            .class_method => {},
         }
         value.* = undefined;
     }
@@ -1562,7 +1570,7 @@ const Value = union(enum) {
             .assembly => .assembly,
             .assembly_field => .assembly_field,
             .class => .class,
-            .class_member => .class_member,
+            .class_method => .class_method,
         };
     }
 };
@@ -3485,7 +3493,7 @@ const ErrorFmt = struct {
                 var name: ManagedId = .empty();
                 _ = lexClass(f.text, &namespace, &name, m.id_start);
                 try writer.print(
-                    "{d}: this assembly does not have a class named {s} in namespace {s}",
+                    "{d}: this assembly does not have a class named '{s}' in namespace '{s}'",
                     .{
                         getLineNum(f.text, m.id_start),
                         name.slice(),
@@ -3617,7 +3625,7 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
         "@Class(@Assembly(\"mscorlib\")." ++ ("a" ** (ManagedId.max + 1)) ++ ")",
         "1: id '" ++ ("a" ** (ManagedId.max + 1)) ++ "' is too big (1024 bytes but max is 1023)",
     );
-    try testBadCode(mono_funcs, "@Class(@Assembly(\"mscorlib\").DoesNot.Exist)", "1: this assembly does not have a class named Exist in namespace DoesNot");
+    try testBadCode(mono_funcs, "@Class(@Assembly(\"mscorlib\").DoesNot.Exist)", "1: this assembly does not have a class named 'Exist' in namespace 'DoesNot'");
     try testBadCode(mono_funcs, "999999999999999999999", "1: integer literal '999999999999999999999' doesn't fit in an i64");
     // try testBadCode(mono_funcs, "-999999999999999999999", "1: integer literal '-999999999999999999999' doesn't fit in an i64");
     // const max_fields = 256;
@@ -3867,6 +3875,11 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\  counter = counter + 1
         \\  if (counter < 5) { continue }
         \\break
+    );
+    try testCode(mono_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Int32 = @Class(mscorlib.System.Int32)
+        \\//@Log("Int: ", Int32.MaxValue)
     );
 }
 
