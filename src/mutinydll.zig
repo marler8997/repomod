@@ -567,12 +567,12 @@ fn findStaleMod() ?*Mod {
     return null;
 }
 
-// Export a function that the C# managed code can call
-// This allows us to bridge between native and managed
-export fn NativeLog(message: [*:0]const u8) callconv(.c) void {
-    const msg = std.mem.span(message);
-    std.log.info("{s}", .{msg});
-}
+// // Export a function that the C# managed code can call
+// // This allows us to bridge between native and managed
+// export fn NativeLog(message: [*:0]const u8) callconv(.c) void {
+//     const msg = std.mem.span(message);
+//     std.log.info("{s}", .{msg});
+// }
 
 fn log(
     comptime message_level: std.log.Level,
@@ -582,26 +582,39 @@ fn log(
 ) void {
     const level_txt = comptime message_level.asText();
     const scope_suffix = if (scope == .default) "" else "(" ++ @tagName(scope) ++ "): ";
+    const level_scope = level_txt ++ scope_suffix;
 
-    var buffer: [400]u8 = undefined;
-    const writer = std.debug.lockStderrWriter(&buffer);
-    defer std.debug.unlockStderrWriter();
+    {
+        std.debug.lockStdErr();
+        defer std.debug.unlockStdErr();
+        var buffer: [400]u8 = undefined;
+        var stderr_writer = std.fs.File.stderr().writer(&buffer);
+        writeLog(level_scope ++ "|" ++ format, args, &stderr_writer.interface) catch std.debug.panic(
+            "write to stderr failed with {t}",
+            .{stderr_writer.err orelse error.Unexpected},
+        );
+    }
 
+    // TODO: also log to file?
+}
+
+fn writeLogPrefix(writer: *std.Io.Writer) error{WriteFailed}!void {
     // const name: []const u16 = blk: {
     //     const p = getImagePathName() orelse break :blk win32.L("?");
     //     break :blk getBasename(p);
     // };
-
-    {
-        var time: win32.SYSTEMTIME = undefined;
-        win32.GetSystemTime(&time);
-        writer.print(
-            "mod: {:0>2}:{:0>2}:{:0>2}.{:0>3}|{}|" ++ level_txt ++ scope_suffix ++ "|",
-            .{ time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, win32.GetCurrentThreadId() },
-        ) catch |err| std.debug.panic("print log prefix failed with {s}", .{@errorName(err)});
-    }
-    writer.print(format ++ "\n", args) catch |err| std.debug.panic("print log failed with {s}", .{@errorName(err)});
-    writer.flush() catch |err| std.debug.panic("flush log file failed with {s}", .{@errorName(err)});
+    var time: win32.SYSTEMTIME = undefined;
+    win32.GetSystemTime(&time);
+    try writer.print(
+        "mod: {:0>2}:{:0>2}:{:0>2}.{:0>3}|{}|",
+        .{ time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, win32.GetCurrentThreadId() },
+    );
+}
+fn writeLog(comptime format: []const u8, args: anytype, writer: *std.Io.Writer) error{WriteFailed}!void {
+    try writeLogPrefix(writer);
+    // @compileError("Format is " ++ format);
+    try writer.print(format ++ "\n", args);
+    try writer.flush();
 }
 
 // fn getImagePathName() ?[]const u16 {
