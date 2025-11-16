@@ -818,7 +818,7 @@ fn evalExprSuffix(
                                 (try vm.push(i64)).* = value;
                             },
                             else => |kind| {
-                                std.debug.print("todo: field type kind={t}\n", .{kind});
+                                std.log.warn("todo: field type kind={t}", .{kind});
                                 return vm.setError(.{ .not_implemented2 = .{
                                     .pos = expr_first_token.start,
                                     .msg = "class field of this type",
@@ -881,7 +881,6 @@ fn evalExprSuffix(
                     const return_type = vm.mono_funcs.signature_get_return_type(method_sig) orelse @panic(
                         "method has no return type?", // impossible right?
                     );
-
                     var managed_args_buf: [max_arg_count]*anyopaque = undefined;
 
                     var next_arg_addr = args_addr;
@@ -909,7 +908,7 @@ fn evalExprSuffix(
                                 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                                 // const c_str = vm.mono_funcs.string_to_utf8(@ptrCast(@constCast(managed_args_buf[arg_index]))) orelse @panic("here");
                                 // defer vm.mono_funcs.free(@ptrCast(@constCast(c_str)));
-                                // std.debug.print("ManagedString value is '{s}'", .{std.mem.span(c_str)});
+                                // std.log.warn("ManagedString value is '{s}'", .{std.mem.span(c_str)});
                                 break :blk @constCast(str);
                             },
                             else => |a| {
@@ -934,47 +933,25 @@ fn evalExprSuffix(
                     );
                     vm.discardValues(args_addr);
                     _ = vm.mem.discardFrom(args_addr);
-
-                    if (false) std.debug.print(
-                        "Result=0x{x} Exception=0x{x}\n",
+                    if (false) std.log.warn(
+                        "Result=0x{x} Exception=0x{x}",
                         .{ @intFromPtr(maybe_result), @intFromPtr(maybe_exception) },
                     );
                     if (maybe_exception) |e| {
-                        std.log.err("TODO: handle exception 0x{x}\n", .{@intFromPtr(e)});
+                        std.log.err("TODO: handle exception 0x{x}", .{@intFromPtr(e)});
                         return vm.setError(.{ .not_implemented = "handle exception" });
                     }
-                    switch (vm.mono_funcs.type_get_type(return_type)) {
-                        .void => if (maybe_result) |_| {
-                            return vm.setError(.{ .not_implemented = "error message for calling managed function with void return type that returned something" });
-                        },
-                        .i4 => {
-                            const result = maybe_result orelse return vm.setError(.{ .not_implemented = "error message for calling managed function with i4 return type that returned null" });
-                            const unboxed: *align(1) i32 = @ptrCast(vm.mono_funcs.object_unbox(result));
-                            (try vm.push(Type)).* = .integer;
-                            (try vm.push(i64)).* = unboxed.*;
-                        },
-                        .string => {
-                            const result = maybe_result orelse return vm.setError(.{ .not_implemented = "error message for calling managed function with string return type that returned null" });
-                            // const c_string = vm.mono_funcs.string_to_utf8(result) orelse return vm.setError(.{
-                            //     .static_error = .{
-                            //         .pos = suffix_op_token.start,
-                            //         .string = "managed string to native returned null",
-                            //     },
-                            // });
-                            // errdefer vm.mono_funcs.free(@ptrCast(@constCast(c_string)));
-                            // (try vm.push(Type)).* = .c_string;
-                            // (try vm.push([*:0]const u8)).* = c_string;
 
-                            // 0 means we don't require pinning
-                            const handle = vm.mono_funcs.gchandle_new(result, 0);
-                            errdefer vm.mono_funcs.gchandle_free(handle);
-                            (try vm.push(Type)).* = .managed_string;
-                            (try vm.push(mono.GcHandle)).* = handle;
-                        },
-                        else => |kind| {
-                            std.debug.print("ReturnTypeKind={t}\n", .{kind});
-                            return vm.setError(.{ .not_implemented = "managed return value of this type" });
-                        },
+                    const return_type_kind = vm.mono_funcs.type_get_type(return_type);
+                    if (maybe_result) |result| {
+                        const object_type = MonoObjectType.init(return_type_kind) orelse {
+                            std.log.warn("unsupported return type kind {t}", .{return_type_kind});
+                            return vm.setError(.{ .not_implemented = "error message for bad or unsupported return type" });
+                        };
+                        try vm.pushMonoObject(object_type, result);
+                    } else if (return_type_kind != .void) {
+                        std.log.warn("unexpected return type kind {t} for null return value", .{return_type_kind});
+                        return vm.setError(.{ .not_implemented = "error message for non-void return type with null value" });
                     }
                     return args.end;
                 },
@@ -1003,6 +980,90 @@ fn evalExprSuffix(
         },
         else => null,
     };
+}
+
+// The type of a mono Object (can't be void)
+const MonoObjectType = enum {
+    boolean,
+    char,
+    i1,
+    u1,
+    i2,
+    u2,
+    i4,
+    u4,
+    i8,
+    u8,
+    r4,
+    r8,
+    string,
+    ptr,
+    valuetype,
+    class,
+
+    pub fn init(kind: mono.TypeKind) ?MonoObjectType {
+        return switch (kind) {
+            .end => null,
+            .void => null,
+            .boolean => .boolean,
+            .char => .char,
+            .i1 => .i1,
+            .u1 => .u1,
+            .i2 => .i2,
+            .u2 => .u2,
+            .i4 => .i4,
+            .u4 => .u4,
+            .i8 => .i8,
+            .u8 => .u8,
+            .r4 => .r4,
+            .r8 => .r8,
+            .string => .string,
+            .ptr => .ptr,
+            .valuetype => .valuetype,
+            .class => .class,
+            .byref, .@"var", .array, .genericinst, .typedbyref, .i, .u, .fnptr, .object, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
+                std.log.warn("unsure if type '{s}' should be supported", .{@tagName(t)});
+                return null;
+            },
+            _ => null,
+        };
+    }
+};
+
+fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const mono.Object) error{Vm}!void {
+    switch (object_type) {
+        .boolean => {
+            const unboxed: *align(1) c_int = @ptrCast(vm.mono_funcs.object_unbox(object));
+            (try vm.push(Type)).* = .integer;
+            (try vm.push(i64)).* = if (unboxed.* == 0) 0 else 1;
+        },
+        .i4 => {
+            const unboxed: *align(1) i32 = @ptrCast(vm.mono_funcs.object_unbox(object));
+            (try vm.push(Type)).* = .integer;
+            (try vm.push(i64)).* = unboxed.*;
+        },
+        .string => {
+            // const c_string = vm.mono_funcs.string_to_utf8(result) orelse return vm.setError(.{
+            //     .static_error = .{
+            //         .pos = suffix_op_token.start,
+            //         .string = "managed string to native returned null",
+            //     },
+            // });
+            // errdefer vm.mono_funcs.free(@ptrCast(@constCast(c_string)));
+            // (try vm.push(Type)).* = .c_string;
+            // (try vm.push([*:0]const u8)).* = c_string;
+
+            // 0 means we don't require pinning
+            const handle = vm.mono_funcs.gchandle_new(object, 0);
+            errdefer vm.mono_funcs.gchandle_free(handle);
+            (try vm.push(Type)).* = .managed_string;
+            (try vm.push(mono.GcHandle)).* = handle;
+        },
+        else => {
+            std.log.warn("todo: support pushing mono type {t}", .{object_type});
+            return vm.setError(.{ .not_implemented = "managed return value of this type" });
+        },
+    }
 }
 
 fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
