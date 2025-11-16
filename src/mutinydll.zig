@@ -15,8 +15,8 @@ pub fn panic(
         std.log.err("panic: {s}", .{msg});
     }
     if (0 == global.paniced_threads_dumping.fetchAdd(1, .seq_cst)) {
-        var maybe_open_error: ?logfile.OpenFileError = null;
-        const log_file = logfile.global.get(&maybe_open_error);
+        const log_file, const maybe_open_log_error = logfile.global.get();
+        _ = maybe_open_log_error;
         var buffer: [1024]u8 = undefined;
         var file_writer = log_file.writer(&buffer);
         writeStackTrace(
@@ -224,17 +224,37 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     // what we expect after attaching our thread to it
     std.debug.assert(mono_funcs.domain_get() == root_domain);
 
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    if (true) {
+        std.log.err("!!!!!!!!!! TODO: we need a way to filter mods !!!!!!!!!!!!!", .{});
+    }
+
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    var last_update_mods_error: ?UpdateModsError = null;
+
     while (true) {
-        const update_result = updateMods(
-            &mono_funcs,
-            scratch.allocator(),
-        );
+        var tests_scheduled = false;
+
+        {
+            const maybe_new_error = updateMods(
+                &mono_funcs,
+                scratch.allocator(),
+                &tests_scheduled,
+            );
+            if (maybe_new_error) |*new_error| {
+                const same_error = if (last_update_mods_error) |*le| new_error.eql(le) else false;
+                if (!same_error) {
+                    new_error.log();
+                }
+            }
+            last_update_mods_error = maybe_new_error;
+        }
+
         if (!scratch.reset(.retain_capacity)) {
             std.log.warn("reset scratch allocator failed?", .{});
         }
 
-        if (update_result.tests_scheduled) {
+        if (tests_scheduled) {
             std.log.info("@ScheduleTests requested! running...", .{});
             Vm.runTests(&mono_funcs) catch |err| {
                 std.log.err("tests failed with {s}:", .{@errorName(err)});
@@ -422,15 +442,50 @@ const Mod = struct {
     }
 };
 
-const UpdateModsResult = struct {
-    tests_scheduled: bool,
+const mods_path = "C:\\mutiny\\mods";
+
+const UpdateModsError = union(enum) {
+    open_mods_dir_error: std.fs.Dir.OpenError,
+    iterate_mods_dir_error: std.fs.Dir.Iterator.Error,
+
+    pub fn eql(left: *const UpdateModsError, right: *const UpdateModsError) bool {
+        return switch (left.*) {
+            .open_mods_dir_error => |left_err| switch (right.*) {
+                .open_mods_dir_error => |right_err| left_err == right_err,
+                else => false,
+            },
+            .iterate_mods_dir_error => |left_err| switch (right.*) {
+                .iterate_mods_dir_error => |right_err| left_err == right_err,
+                else => false,
+            },
+        };
+    }
+    pub fn log(err: *const UpdateModsError) void {
+        switch (err.*) {
+            .open_mods_dir_error => |e| switch (e) {
+                error.FileNotFound => std.log.info(
+                    "no mods (directory '{s}' does not exist)",
+                    .{mods_path},
+                ),
+                else => |e2| std.log.err(
+                    "open  '{s}' failed with {t}",
+                    .{ mods_path, e2 },
+                ),
+            },
+            .iterate_mods_dir_error => |e| std.log.err(
+                "iterate '{s}' failed with {t}",
+                .{ mods_path, e },
+            ),
+        }
+    }
 };
 
 fn updateMods(
     mono_funcs: *const mono.Funcs,
     scratch: std.mem.Allocator,
-) UpdateModsResult {
-    var result: UpdateModsResult = .{ .tests_scheduled = false };
+    out_tests_scheduled: *bool,
+) ?UpdateModsError {
+    std.debug.assert(out_tests_scheduled.* == false);
 
     {
         var maybe_mod = global.mods.first;
@@ -440,17 +495,17 @@ fn updateMods(
         }
     }
 
-    const mod_path = "C:\\temp\\mutinymods";
-    if (false) std.log.info("loading mods from '{s}'...", .{mod_path});
-    var dir = std.fs.cwd().openDir(mod_path, .{ .iterate = true }) catch |err| {
-        std.log.err("open mod directory '{s}' failed with {s}", .{ mod_path, @errorName(err) });
-        return result;
+    if (false) std.log.info("loading mods from '{s}'...", .{mods_path});
+    var dir = std.fs.cwd().openDir(mods_path, .{ .iterate = true }) catch |err| {
+        // TODO: should we try seeing if the mutiny folder even exists
+        return .{ .open_mods_dir_error = err };
     };
     defer dir.close();
+
     var it = dir.iterate();
     while (it.next() catch |err| {
-        std.log.err("iterate mod directory '{s}' failed with {s}", .{ mod_path, @errorName(err) });
-        return result;
+        std.log.err("iterate mod directory '{s}' failed with {s}", .{ mods_path, @errorName(err) });
+        return .{ .iterate_mods_dir_error = err };
     }) |entry| {
         if (entry.kind != .file) continue;
         const mod_name_len: u8 = std.math.cast(u8, entry.name.len) orelse {
@@ -494,7 +549,7 @@ fn updateMods(
 
         switch (mod.state) {
             .initial, .err_no_text => {},
-            .have_text => |*h| runMod(mono_funcs, &result, mod.name(), h),
+            .have_text => |*h| runMod(mono_funcs, out_tests_scheduled, mod.name(), h),
         }
     }
 
@@ -502,12 +557,12 @@ fn updateMods(
         std.log.info("deleting mod '{s}'", .{mod.name()});
         mod.delete();
     }
-    return result;
+    return null;
 }
 
 fn runMod(
     mono_funcs: *const mono.Funcs,
-    update_mods_result: *UpdateModsResult,
+    out_tests_scheduled: *bool,
     mod_name: []const u8,
     have_text: *Mod.HaveText,
 ) void {
@@ -548,7 +603,7 @@ fn runMod(
     if (maybe_eval) |eval| {
         if (eval.vm.evalRoot(eval.block_resume)) |yield| {
             // TODO: call vm.verifyStack?
-            update_mods_result.tests_scheduled = update_mods_result.tests_scheduled or eval.vm.tests_scheduled;
+            out_tests_scheduled.* = out_tests_scheduled.* or eval.vm.tests_scheduled;
             eval.vm.tests_scheduled = false;
             have_text.vm_state.?.yielded = .{
                 .time = getNow(),
@@ -598,8 +653,7 @@ fn log(
     const scope_suffix = if (scope == .default) "" else "(" ++ @tagName(scope) ++ "): ";
     const level_scope = level_txt ++ scope_suffix;
 
-    var maybe_open_error: ?logfile.OpenFileError = null;
-    const log_file = logfile.global.get(&maybe_open_error);
+    const log_file, const maybe_open_error = logfile.global.get();
     var buffer: [1024]u8 = undefined;
     var file_writer = log_file.writer(&buffer);
 
@@ -615,14 +669,11 @@ fn writeFlushLog(
     comptime format: []const u8,
     args: anytype,
     writer: *std.Io.Writer,
-    maybe_open_error: ?logfile.OpenFileError,
+    maybe_open_error: ?logfile.OpenLogError,
 ) error{WriteFailed}!void {
     if (maybe_open_error) |open_error| {
         try logfile.writeLogPrefix(writer);
-        if (builtin.os.tag == .windows)
-            try writer.print("open log file failed, error={f}\n", .{open_error})
-        else
-            try writer.print("open log file failed with {s}\n", .{@errorName(open_error)});
+        try writer.print("{f}", .{open_error});
     }
     try logfile.writeLogPrefix(writer);
     try writer.print(format ++ "\n", args);

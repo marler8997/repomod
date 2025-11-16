@@ -1,16 +1,13 @@
-const std = @import("std");
-const win32 = @import("win32").everything;
-
 pub fn main() !void {
-    var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_instance.deinit();
-    const gpa = gpa_instance.allocator();
+    var arena_instance: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    // no need to deinit
+    const arena = arena_instance.allocator();
 
-    const all_args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, all_args);
+    const all_args = try std.process.argsAlloc(arena);
+    // no need to free
 
     if (all_args.len <= 1) {
-        try std.fs.File.stderr().writeAll("Usage: launcher.exe MUTINY_DLL [pid PID][exe EXE...]\n");
+        try std.fs.File.stderr().writeAll("Usage: launcher.exe MUTINY_DLL [attach PID][start EXE...]\n");
         std.process.exit(0xff);
     }
     const args = all_args[1..];
@@ -20,22 +17,37 @@ pub fn main() !void {
     }
     const mutiny_dll_arg = args[0];
     const kind_string = args[1];
-    const kind: union(enum) { pid: u32, exe: struct {
-        path: [:0]const u8,
-        args: []const [:0]const u8,
-    } } = blk: {
-        if (std.mem.eql(u8, kind_string, "pid")) {
-            if (args.len < 3) errExit("missing the pid number after 'pid' on the cmdline", .{});
+    const kind: union(enum) {
+        attach: u32,
+        start: struct {
+            exe: [:0]const u16,
+            args: []const [:0]const u8,
+            name: []const u16,
+        },
+    } = blk: {
+        if (std.mem.eql(u8, kind_string, "attach")) {
+            if (args.len < 3) errExit("missing the pid number after 'attach' on the cmdline", .{});
             const pid_string = args[2];
             const pid = std.fmt.parseInt(u32, pid_string, 10) catch errExit("invalid pid '{s}'", .{pid_string});
             if (args.len > 3) errExit("too many cmdline args (nothing expected after pid number)", .{});
-            break :blk .{ .pid = pid };
+            break :blk .{ .attach = pid };
         }
-        if (std.mem.eql(u8, kind_string, "exe")) break :blk .{ .exe = .{
-            .path = args[2],
-            .args = args[3..],
-        } };
-        errExit("expected 'pid' or 'exe' cmdline arg but got '{s}'", .{kind_string});
+        if (std.mem.eql(u8, kind_string, "start")) {
+            const exe_ascii = args[2];
+            const exe_wide = try std.unicode.utf8ToUtf16LeAllocZ(arena, exe_ascii);
+            break :blk .{ .start = .{
+                .exe = exe_wide,
+                .args = args[3..],
+                .name = nameFromExe(exe_wide) catch |err| errExit("invalid exe '{f}' ({s})", .{
+                    std.unicode.fmtUtf16Le(exe_wide), switch (err) {
+                        error.Empty => "can't just be an empty string",
+                        error.EndsInSeparator => "cannot end with a filesystem separator",
+                        error.JustDotExe => "can't just be '.exe'",
+                    },
+                }),
+            } };
+        }
+        errExit("expected 'attach' or 'start' cmdline arg but got '{s}'", .{kind_string});
     };
     // TODO: should we enforce that the DLL path is absolute so that it guarantees it isn't
     //       overriden by something else?
@@ -47,18 +59,17 @@ pub fn main() !void {
         else => |e| return e,
     };
     // convert the mutiny DLL path to a real absolute path so that it can be loaded by the
-    // game process.
-    const mutiny_dll_realpath = std.fs.cwd().realpathAlloc(gpa, mutiny_dll_arg) catch |err| errExit(
+    // game process regardless of it's CWD.
+    const mutiny_dll_realpath = std.fs.cwd().realpathAlloc(arena, mutiny_dll_arg) catch |err| errExit(
         "convert mutiny dll path '{s}' to realpath failed with {s}",
         .{ mutiny_dll_arg, @errorName(err) },
     );
-    defer gpa.free(mutiny_dll_realpath);
-
-    const mutiny_dll_realpath_w = try std.unicode.wtf8ToWtf16LeAllocZ(gpa, mutiny_dll_realpath);
-    defer gpa.free(mutiny_dll_realpath_w);
+    // no need to free
+    const mutiny_dll_realpath_w = try std.unicode.wtf8ToWtf16LeAllocZ(arena, mutiny_dll_realpath);
+    // no need to free
 
     const process: ProcessResult = blk: switch (kind) {
-        .pid => |pid| {
+        .attach => |pid| {
             const process = win32.OpenProcess(
                 .{
                     .VM_OPERATION = 1, // Required for VirtualAllocEx/VirtualFreeEx
@@ -70,19 +81,9 @@ pub fn main() !void {
             ) orelse errExit("OpenProcess pid {} failed, error={f}", .{ pid, win32.GetLastError() });
             break :blk .{ .created = false, .pid = pid, .process = process, .maybe_suspended_thread = null };
         },
-        .exe => |exe| {
-            if (exe.args.len > 0) @panic("TODO: support extra exe cmdline args");
-            std.fs.accessAbsolute(exe.path, .{}) catch |err| switch (err) {
-                error.FileNotFound => {
-                    std.log.err("'{s}' not found", .{exe.path});
-                    std.process.exit(0xff);
-                },
-                else => |e| return e,
-            };
-            std.log.info("launching '{s}'...", .{exe.path});
-            const exe_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, exe.path);
-            defer gpa.free(exe_w);
-            break :blk try createProcess(exe_w);
+        .start => |start| {
+            if (start.args.len > 0) @panic("TODO: support extra exe cmdline args");
+            break :blk try createProcess(start.name, start.exe);
         },
     };
     defer process.deinit();
@@ -113,6 +114,23 @@ pub fn main() !void {
     std.log.info("success", .{});
 }
 
+fn nameFromExe(exe: []const u16) error{ Empty, EndsInSeparator, JustDotExe }![]const u16 {
+    if (exe.len == 0) return error.Empty;
+    const basename_start = blk: {
+        var i: usize = exe.len;
+        while (i > 0) : (i -= 1) switch (exe[i - 1]) {
+            '/', '\\' => break :blk i,
+            else => {},
+        };
+        break :blk i;
+    };
+    if (basename_start == exe.len) return error.EndsInSeparator;
+    const basename = exe[basename_start..];
+    const name = if (std.mem.endsWith(u16, basename, win32.L(".exe"))) basename[0 .. basename.len - 4] else basename;
+    if (name.len == 0) return error.JustDotExe;
+    return name;
+}
+
 fn getDirname(path: []const u16) ?[]const u16 {
     for (1..path.len) |i| {
         if (path[path.len - i] == '\\')
@@ -134,9 +152,26 @@ const ProcessResult = struct {
     }
 };
 
-fn createProcess(game_exe: [:0]const u16) !ProcessResult {
-    const stdout_path = win32.L("C:\\temp\\mutiny-stdout.log");
-    const stderr_path = win32.L("C:\\temp\\mutiny-stderr.log");
+const mutiny_started_dir = "C:\\mutiny\\started";
+
+fn createProcess(name: []const u16, game_exe: [:0]const u16) !ProcessResult {
+    try std.fs.cwd().makePath(mutiny_started_dir);
+
+    const max_name = 100;
+    const name_truncated = name[0..@min(max_name, name.len)];
+
+    const StdoutPath = MaxString(.wtf16, .yes_sentinel, &.{
+        .{ .static = win32.L(mutiny_started_dir ++ "\\") },
+        .{ .runtime_wtf16 = .{ .name = "exe_name", .max_len = max_name } },
+        .{ .static = win32.L(".stdout.txt") },
+    });
+    const StderrPath = MaxString(.wtf16, .yes_sentinel, &.{
+        .{ .static = win32.L(mutiny_started_dir ++ "\\") },
+        .{ .runtime_wtf16 = .{ .name = "exe_name", .max_len = max_name } },
+        .{ .static = win32.L(".stderr.txt") },
+    });
+    const stdout_path = StdoutPath.format(.{ .exe_name = name_truncated });
+    const stderr_path = StderrPath.format(.{ .exe_name = name_truncated });
 
     var security_attrs: win32.SECURITY_ATTRIBUTES = .{
         .nLength = @sizeOf(win32.SECURITY_ATTRIBUTES),
@@ -146,7 +181,7 @@ fn createProcess(game_exe: [:0]const u16) !ProcessResult {
 
     const stdout_file: std.fs.File = .{
         .handle = win32.CreateFileW(
-            stdout_path,
+            stdout_path.slice(),
             .{ .FILE_APPEND_DATA = 1 }, // all writes append to end of file
             .{ .READ = 1 },
             &security_attrs,
@@ -169,7 +204,7 @@ fn createProcess(game_exe: [:0]const u16) !ProcessResult {
 
     const stderr_file: std.fs.File = .{
         .handle = win32.CreateFileW(
-            stderr_path,
+            stderr_path.slice(),
             .{ .FILE_APPEND_DATA = 1 }, // all writes append to end of file
             .{ .READ = 1 },
             &security_attrs,
@@ -239,7 +274,10 @@ fn createProcess(game_exe: [:0]const u16) !ProcessResult {
         &si,
         &pi,
     );
-    if (result == 0) win32.panicWin32("CreateProcess", win32.GetLastError());
+    if (result == 0) switch (win32.GetLastError()) {
+        .ERROR_FILE_NOT_FOUND => errExit("executable '{f}' does not exist", .{std.unicode.fmtUtf16Le(game_exe)}),
+        else => |e| win32.panicWin32("CreateProcess", e),
+    };
     std.log.info("created game process (pid {})", .{pi.dwProcessId});
     return .{
         .created = true,
@@ -322,7 +360,7 @@ fn injectDLL(process: win32.HANDLE, dll_path: [:0]const u16) !void {
         std.process.exit(0xff);
     }
     std.log.debug(
-        "{f}: Loaded at address 0x{x} (might be truncated)",
+        "{f}: loaded at address 0x{x} (might be truncated)",
         .{ std.unicode.fmtUtf16Le(dll_path), exit_code },
     );
 }
@@ -331,3 +369,7 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
     std.log.err(fmt, args);
     std.process.exit(0xff);
 }
+
+const std = @import("std");
+const win32 = @import("win32").everything;
+const MaxString = @import("maxstring.zig").MaxString;

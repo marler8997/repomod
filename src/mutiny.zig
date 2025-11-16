@@ -29,6 +29,7 @@ pub const panic = zin.panic(.{ .title = "Mutiny Panic!" });
 const global = struct {
     var class_extra: ?zin.WindowClass = null;
     var mouse_position: ?zin.XY = null;
+    var mutiny_dir_exists: ?bool = null;
 };
 
 pub fn main() !void {
@@ -71,7 +72,7 @@ fn callback(cb: zin.Callback(.{ .static = .main })) void {
         .window_size => {},
         .draw => |d| {
             d.clear();
-            d.text("Hello", 0, 0, .white);
+            d.text("MutinyFolder: C:\\mutiny", 0, 0, .white);
             // {
             //     const now = std.time.Instant.now() catch @panic("?");
             //     const elapsed_ns = if (global.last_animation) |l| now.since(l) else 0;

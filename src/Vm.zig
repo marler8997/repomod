@@ -1364,11 +1364,10 @@ fn evalBuiltin(
             return error.Vm;
         },
         .@"@Log" => {
-            var maybe_open_error: ?logfile.OpenFileError = null;
-            const log_file = logfile.global.get(&maybe_open_error);
+            const log_file, const maybe_get_log_error = logfile.global.get();
             var buffer: [1024]u8 = undefined;
             var file_writer = log_file.writer(&buffer);
-            vm.log(&file_writer.interface, maybe_open_error, args_addr) catch |err| switch (err) {
+            vm.log(&file_writer.interface, maybe_get_log_error, args_addr) catch |err| switch (err) {
                 error.WriteFailed => return vm.setError(.{ .log_error = .{
                     .pos = builtin_extent.start,
                     .err = file_writer.err orelse error.Unexpected,
@@ -1483,15 +1482,15 @@ fn evalBuiltin(
 fn log(
     vm: *Vm,
     writer: *std.Io.Writer,
-    maybe_open_error: ?logfile.OpenFileError,
+    maybe_open_log_error: ?logfile.OpenLogError,
     args_addr: Memory.Addr,
 ) error{WriteFailed}!void {
-    if (maybe_open_error) |open_error| {
+    if (maybe_open_log_error) |*open_log_error| {
         try logfile.writeLogPrefix(writer);
         if (@import("builtin").os.tag == .windows)
-            try writer.print("open log file failed, error={f}\n", .{open_error})
+            try writer.print("open log file failed, error={f}\n", .{open_log_error})
         else
-            try writer.print("open log file failed with {s}\n", .{@errorName(open_error)});
+            try writer.print("open log file failed with {s}\n", .{@errorName(open_log_error)});
     }
 
     try logfile.writeLogPrefix(writer);
