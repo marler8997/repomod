@@ -43,7 +43,6 @@ const ReturnStorage = struct {
 const Type = enum {
     integer,
     string_literal,
-    // c_string,
     managed_string,
     script_function,
     assembly,
@@ -51,6 +50,7 @@ const Type = enum {
     class,
     class_method,
     object,
+    managed_struct,
     pub fn what(t: Type) []const u8 {
         return switch (t) {
             .integer => "an integer",
@@ -63,13 +63,13 @@ const Type = enum {
             .class => "a class",
             .class_method => "a class method",
             .object => "an object",
+            .managed_struct => "a managed struct",
         };
     }
     pub fn canMarshal(t: Type) bool {
         return switch (t) {
             .integer => true,
             .string_literal => true,
-            // .c_string => true,
             .managed_string => true,
             // to send a function like a callback, I think we'll want some
             // sort of @CompileFunction() builtin or something so we
@@ -77,9 +77,10 @@ const Type = enum {
             .script_function => false,
             .assembly => false, // not sure if this should work or not
             .assembly_field => false, // not sure if this should work or not
-            .class => false, // TODO
-            .class_method => false, // TODO
-            .object => false, // TODO
+            .class => true,
+            .class_method => true,
+            .object => true,
+            .managed_struct => true,
         };
     }
 };
@@ -836,6 +837,7 @@ fn evalExprSuffix(
                     return id_extent.end;
                 },
                 .object => vm.setError(.{ .not_implemented = "object fields" }),
+                .managed_struct => vm.setError(.{ .not_implemented = "managed struct fields" }),
             };
         },
         .l_paren => {
@@ -1059,6 +1061,7 @@ fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const mono.Obje
             (try vm.push(Type)).* = .managed_string;
             (try vm.push(mono.GcHandle)).* = handle;
         },
+        .valuetype => {},
         else => {
             std.log.warn("todo: support pushing mono type {t}", .{object_type});
             return vm.setError(.{ .not_implemented = "managed return value of this type" });
@@ -1118,6 +1121,9 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             (try vm.push(Type)).* = .object;
             const object_ptr = vm.mem.toPointer(*const mono.Object, value_addr);
             (try vm.push(*const mono.Object)).* = object_ptr.*;
+        },
+        .managed_struct => {
+            return vm.setError(.{ .not_implemented = "pushValueFromAddr managed_struct" });
         },
     }
 }
@@ -1629,7 +1635,8 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
             const id_start, const end = vm.readValue(usize, id_start_addr);
             return .{ .{ .class_method = .{ .class = class, .id_start = id_start } }, end };
         },
-        .object => @panic("implement readValue2 for object"),
+        .object => @panic("readAnyValue for object"),
+        .managed_struct => @panic("readAnyValue for managed struct"),
     }
 }
 
