@@ -98,6 +98,7 @@ fn writeStackTrace(
         );
     }
     try std.debug.dumpCurrentStackTraceToWriter(ret_addr orelse @returnAddress(), writer);
+    try writer.flush();
 }
 
 pub const std_options: std.Options = .{
