@@ -4,6 +4,27 @@ const global = struct {
     var paniced_threads_msgboxing: std.atomic.Value(u32) = .{ .raw = 0 };
 
     var mods: std.DoublyLinkedList = .{};
+
+    var write_log_mutex: Mutex = .{};
+
+    var get_log_file_mutex: Mutex = .{};
+    var log_file_cached: ?std.fs.File = null;
+    pub fn getLogFile(open_error: *?std.fs.File.OpenError) std.fs.File {
+        std.debug.assert(open_error.* == null);
+        get_log_file_mutex.lock();
+        defer get_log_file_mutex.unlock();
+        if (log_file_cached == null) {
+            log_file_cached = blk: {
+                if (std.fs.openFileAbsolute("C:\\temp\\mutiny.log", .{})) |file| {
+                    break :blk file;
+                } else |err| {
+                    open_error.* = err;
+                    break :blk std.fs.File.stderr();
+                }
+            };
+        }
+        return log_file_cached.?;
+    }
 };
 
 pub fn panic(
@@ -15,12 +36,22 @@ pub fn panic(
         std.log.err("panic: {s}", .{msg});
     }
     if (0 == global.paniced_threads_dumping.fetchAdd(1, .seq_cst)) {
-        const stderr = std.debug.lockStderrWriter(&.{});
-        defer std.debug.unlockStderrWriter();
-        if (error_return_trace) |trace| {
-            std.debug.dumpStackTrace(trace.*);
-        }
-        std.debug.dumpCurrentStackTraceToWriter(ret_addr orelse @returnAddress(), stderr) catch {};
+        var maybe_open_error: ?std.fs.File.OpenError = null;
+        const log_file = global.getLogFile(&maybe_open_error);
+        var buffer: [1024]u8 = undefined;
+        var file_writer = log_file.writer(&buffer);
+        writeStackTrace(
+            error_return_trace,
+            ret_addr,
+            std.io.tty.detectConfig(log_file),
+            &file_writer.interface,
+        ) catch |err| file_writer.interface.print(
+            "write stack trace failed with {t}",
+            .{switch (err) {
+                error.WriteFailed => file_writer.err orelse error.Unexpected,
+                else => |e| e,
+            }},
+        ) catch {};
     }
     if (0 == global.paniced_threads_msgboxing.fetchAdd(1, .seq_cst)) {
         var buf: [200]u8 = undefined;
@@ -30,31 +61,31 @@ pub fn panic(
             _ = win32.MessageBoxA(null, "message too long", "Mutiny.dll Panic", .{});
         }
     }
-    // can't call this, results in:
-    //     error: lld-link: undefined symbol: _tls_index
-    // this must be because it uses a threadlocal variable "panic_stage"
-    //std.builtin.default_panic(msg, error_return_trace, ret_addr);
-    // _ = error_return_trace;
     @breakpoint();
     win32.ExitThread(0x8071540);
 }
 
-// fn dumpStackTrace() void {
-//     // const stderr = lockStderrWriter(&.{});
-//     // defer unlockStderrWriter();
-//     if (builtin.strip_debug_info) {
-//         stderr.writeAll("Unable to dump stack trace: debug info stripped\n") catch return;
-//         return;
-//     }
-//     const debug_info = getSelfDebugInfo() catch |err| {
-//         stderr.print("Unable to dump stack trace: Unable to open debug info: {s}\n", .{@errorName(err)}) catch return;
-//         return;
-//     };
-//     writeStackTrace(stack_trace, stderr, debug_info, io.tty.detectConfig(.stderr())) catch |err| {
-//         stderr.print("Unable to dump stack trace: {s}\n", .{@errorName(err)}) catch return;
-//         return;
-//     };
-// }
+fn writeStackTrace(
+    error_return_trace: ?*std.builtin.StackTrace,
+    ret_addr: ?usize,
+    tty_config: std.io.tty.Config,
+    writer: *std.Io.Writer,
+) !void {
+    if (error_return_trace) |trace| {
+        if (std.debug.getSelfDebugInfo()) |debug_info| {
+            try std.debug.writeStackTrace(
+                trace.*,
+                writer,
+                debug_info,
+                tty_config,
+            );
+        } else |err| try writer.print(
+            "getSelfDebugInfo for error trace faield with {s}\n",
+            .{@errorName(err)},
+        );
+    }
+    try std.debug.dumpCurrentStackTraceToWriter(ret_addr orelse @returnAddress(), writer);
+}
 
 pub const std_options: std.Options = .{
     .logFn = log,
@@ -584,18 +615,17 @@ fn log(
     const scope_suffix = if (scope == .default) "" else "(" ++ @tagName(scope) ++ "): ";
     const level_scope = level_txt ++ scope_suffix;
 
-    {
-        std.debug.lockStdErr();
-        defer std.debug.unlockStdErr();
-        var buffer: [400]u8 = undefined;
-        var stderr_writer = std.fs.File.stderr().writer(&buffer);
-        writeLog(level_scope ++ "|" ++ format, args, &stderr_writer.interface) catch std.debug.panic(
-            "write to stderr failed with {t}",
-            .{stderr_writer.err orelse error.Unexpected},
-        );
-    }
+    var maybe_open_error: ?std.fs.File.OpenError = null;
+    const log_file = global.getLogFile(&maybe_open_error);
+    var buffer: [1024]u8 = undefined;
+    var file_writer = log_file.writer(&buffer);
 
-    // TODO: also log to file?
+    global.write_log_mutex.lock();
+    defer global.write_log_mutex.unlock();
+    writeFlushLog(level_scope ++ format, args, &file_writer.interface, maybe_open_error) catch std.debug.panic(
+        "write log failed with {s}",
+        .{@errorName(file_writer.err orelse error.Unexpected)},
+    );
 }
 
 fn writeLogPrefix(writer: *std.Io.Writer) error{WriteFailed}!void {
@@ -606,13 +636,21 @@ fn writeLogPrefix(writer: *std.Io.Writer) error{WriteFailed}!void {
     var time: win32.SYSTEMTIME = undefined;
     win32.GetSystemTime(&time);
     try writer.print(
-        "mod: {:0>2}:{:0>2}:{:0>2}.{:0>3}|{}|",
-        .{ time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, win32.GetCurrentThreadId() },
+        "mod: {:0>2}:{:0>2}:{:0>2}.{:0>3}|{}|{}|",
+        .{ time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, win32.GetCurrentProcessId(), win32.GetCurrentThreadId() },
     );
 }
-fn writeLog(comptime format: []const u8, args: anytype, writer: *std.Io.Writer) error{WriteFailed}!void {
+fn writeFlushLog(
+    comptime format: []const u8,
+    args: anytype,
+    writer: *std.Io.Writer,
+    maybe_open_error: ?std.fs.File.OpenError,
+) error{WriteFailed}!void {
+    if (maybe_open_error) |open_error| {
+        try writeLogPrefix(writer);
+        try writer.print("open log file failed with {s}\n", .{@errorName(open_error)});
+    }
     try writeLogPrefix(writer);
-    // @compileError("Format is " ++ format);
     try writer.print(format ++ "\n", args);
     try writer.flush();
 }
