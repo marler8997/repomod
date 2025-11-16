@@ -4,7 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const win32_dep = b.dependency("win32", .{});
+    const zin_dep = b.dependency("zin", .{});
+    const zin_mod = zin_dep.module("zin");
+    const win32_dep = zin_dep.builder.dependency("win32", .{});
+    // const win32_dep = b.dependency("win32", .{});
     const win32_mod = win32_dep.module("win32");
 
     const mutiny_managed_dll = blk: {
@@ -87,6 +90,27 @@ pub fn build(b: *std.Build) void {
         run.addFileArg(mutiny_managed_dll);
         run.addArtifactArg(test_game);
         b.step("testgame", "").dependOn(&run.step);
+    }
+
+    {
+        const exe = b.addExecutable(.{
+            .name = "Mutiny",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/mutiny.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "zin", .module = zin_mod },
+                },
+            }),
+            .win32_manifest = b.path("src/win32dpiaware.manifest"),
+        });
+        exe.addWin32ResourceFile(.{
+            .file = b.path("src/mutiny.rc"),
+        });
+        const run = b.addRunArtifact(exe);
+        if (b.args) |a| run.addArgs(a);
+        b.step("run", "").dependOn(&run.step);
     }
 
     {
