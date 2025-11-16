@@ -16,43 +16,44 @@ pub const global = struct {
 
     const Name = union(enum) {
         success: []const u16,
-        pending_error: getname.Error,
-        error_consumed,
+        err: NameError,
     };
     const name = struct {
         var mutex: Mutex = .{};
         var cached: ?Name = null;
     };
-    pub fn getName() ?[]const u16 {
+    pub fn getName() Name {
         name.mutex.lock();
         defer name.mutex.unlock();
         if (name.cached == null) {
             name.cached = if (getname.fromExe(getImagePathName() orelse win32.L(""))) |string|
                 .{ .success = string }
             else |err|
-                .{ .pending_error = err };
+                .{ .err = .{ .get_name_error = err } };
         }
-        return switch (name.cached.?) {
-            .success => |string| string,
-            .pending_error, .error_consumed => null,
-        };
-    }
-    pub fn consumeNameError() ?getname.Error {
-        name.mutex.lock();
-        defer name.mutex.unlock();
-        const cached = &(name.cached orelse return null);
-        return switch (cached) {
-            .success, .error_consumed => null,
-            .pending_errr => |err| {
-                const error_copy = err;
-                name.cached = .error_consumed;
-                return error_copy;
-            },
-        };
+        return name.cached.?;
     }
 };
 
-pub const NameError = struct {};
+pub const NameError = struct {
+    get_name_error: getname.Error,
+    pub fn format(err: *const NameError, writer: *std.Io.Writer) error{WriteFailed}!void {
+        if (builtin.os.tag == .windows) {
+            const image_path_name = getImagePathName() orelse win32.L("");
+            try writer.print(
+                "failed to extract name from PEB image name '{f}' ({s})",
+                .{
+                    std.unicode.fmtUtf16Le(image_path_name),
+                    @as([]const u8, switch (err.get_name_error) {
+                        error.Empty => "its empty",
+                        error.EndsInSeparator => "it ends with a file separator",
+                        error.JustDotExe => "cant be just '.exe'",
+                    }),
+                },
+            );
+        }
+    }
+};
 
 const log_dir_path = if (builtin.os.tag == .windows) "C:\\mutiny" else "/tmp";
 const log_file_path = if (builtin.os.tag == .windows) "C:\\mutiny\\log" else "/tmp/mutinylog";
@@ -105,7 +106,10 @@ pub fn writeLogPrefix(writer: *std.Io.Writer) error{WriteFailed}!void {
     // };
     var time: win32.SYSTEMTIME = undefined;
     win32.GetSystemTime(&time);
-    const name: []const u16 = if (global.getName()) |name| name else win32.L("?");
+    const name: []const u16 = switch (global.getName()) {
+        .success => |s| s,
+        .err => win32.L("?"),
+    };
     try writer.print(
         "{:0>2}:{:0>2}:{:0>2}.{:0>3}|{}|{}|{f}|",
         .{

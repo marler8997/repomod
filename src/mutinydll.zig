@@ -138,6 +138,27 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
     std.log.info("Init Thread running!", .{});
 
+    const name = switch (logfile.global.getName()) {
+        .success => |s| s,
+        .err => |err| {
+            std.log.err("{f}", .{err});
+            std.log.err("unable to get name, exiting since we use the name to filter which mods we run", .{});
+            return 0xffffffff;
+        },
+    };
+
+    const max_name_wtf16 = 200;
+    if (name.len > max_name_wtf16) {
+        std.log.err("exe name '{f}' too long (max {})", .{ std.unicode.fmtUtf16Le(name), max_name_wtf16 });
+        return 0xffffffff;
+    }
+
+    const ModsPathBuffer = MaxString(.wtf16, .yes_sentinel, &.{
+        .{ .static = win32.L("C:\\mutiny\\mods" ++ "\\") },
+        .{ .runtime_wtf16 = .{ .name = "exe_name", .max_len = max_name_wtf16 } },
+    });
+    const mods_path = ModsPathBuffer.format(.{ .exe_name = name });
+
     // if (win32.AddVectoredExceptionHandler(1, on_vectored_exception)) |_| {
     //     std.log.info("AddVectoredExceptionHandler success", .{});
     // } else {
@@ -237,6 +258,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
 
         {
             const maybe_new_error = updateMods(
+                .{ .slice = mods_path.slice() },
                 &mono_funcs,
                 scratch.allocator(),
                 &tests_scheduled,
@@ -244,7 +266,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
             if (maybe_new_error) |*new_error| {
                 const same_error = if (last_update_mods_error) |*le| new_error.eql(le) else false;
                 if (!same_error) {
-                    new_error.log();
+                    new_error.log(mods_path.slice());
                 }
             }
             last_update_mods_error = maybe_new_error;
@@ -442,8 +464,6 @@ const Mod = struct {
     }
 };
 
-const mods_path = "C:\\mutiny\\mods";
-
 const UpdateModsError = union(enum) {
     open_mods_dir_error: std.fs.Dir.OpenError,
     iterate_mods_dir_error: std.fs.Dir.Iterator.Error,
@@ -460,27 +480,48 @@ const UpdateModsError = union(enum) {
             },
         };
     }
-    pub fn log(err: *const UpdateModsError) void {
+    pub fn log(err: *const UpdateModsError, mods_path: [:0]const u16) void {
         switch (err.*) {
             .open_mods_dir_error => |e| switch (e) {
                 error.FileNotFound => std.log.info(
-                    "no mods (directory '{s}' does not exist)",
-                    .{mods_path},
+                    "no mods (directory '{f}' does not exist)",
+                    .{std.unicode.fmtUtf16Le(mods_path)},
                 ),
                 else => |e2| std.log.err(
-                    "open  '{s}' failed with {t}",
-                    .{ mods_path, e2 },
+                    "open '{f}' failed with {t}",
+                    .{ std.unicode.fmtUtf16Le(mods_path), e2 },
                 ),
             },
             .iterate_mods_dir_error => |e| std.log.err(
-                "iterate '{s}' failed with {t}",
-                .{ mods_path, e },
+                "iterate '{f}' failed with {t}",
+                .{ std.unicode.fmtUtf16Le(mods_path), e },
             ),
         }
     }
 };
 
+const ModsPath = struct {
+    slice: if (builtin.os.tag == .windows) [:0]const u16 else [:0]const u8,
+    pub fn format(path: ModsPath, writer: *std.Io.Writer) error{WriteFailed}!void {
+        if (builtin.os.tag == .windows) {
+            try writer.print("{f}", .{std.unicode.fmtUtf16Le(path.slice)});
+        } else {
+            try writer.writeAll(path.slice);
+        }
+    }
+
+    pub fn open(path: ModsPath, options: std.fs.Dir.OpenOptions) !std.fs.Dir {
+        if (builtin.os.tag == .windows) {
+            const space = try std.os.windows.wToPrefixedFileW(null, path.slice);
+            return try std.fs.cwd().openDirW(space.span(), options);
+        } else {
+            return try std.fs.cwd().openDirZ(path.slice, options);
+        }
+    }
+};
+
 fn updateMods(
+    mods_path: ModsPath,
     mono_funcs: *const mono.Funcs,
     scratch: std.mem.Allocator,
     out_tests_scheduled: *bool,
@@ -495,8 +536,8 @@ fn updateMods(
         }
     }
 
-    if (false) std.log.info("loading mods from '{s}'...", .{mods_path});
-    var dir = std.fs.cwd().openDir(mods_path, .{ .iterate = true }) catch |err| {
+    if (false) std.log.info("loading mods from '{f}'...", .{mods_path});
+    var dir = mods_path.open(.{ .iterate = true }) catch |err| {
         // TODO: should we try seeing if the mutiny folder even exists
         return .{ .open_mods_dir_error = err };
     };
@@ -504,7 +545,7 @@ fn updateMods(
 
     var it = dir.iterate();
     while (it.next() catch |err| {
-        std.log.err("iterate mod directory '{s}' failed with {s}", .{ mods_path, @errorName(err) });
+        std.log.err("iterate mod directory '{f}' failed with {s}", .{ mods_path, @errorName(err) });
         return .{ .iterate_mods_dir_error = err };
     }) |entry| {
         if (entry.kind != .file) continue;
@@ -717,4 +758,5 @@ const win32 = @import("win32").everything;
 const Mutex = @import("Mutex.zig");
 const Vm = @import("Vm.zig");
 const logfile = @import("logfile.zig");
+const MaxString = @import("maxstring.zig").MaxString;
 const mono = @import("mono.zig");
