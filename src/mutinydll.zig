@@ -680,12 +680,6 @@ fn writeFlushLog(
     try writer.flush();
 }
 
-// fn getImagePathName() ?[]const u16 {
-//     const str = &std.os.windows.peb().ProcessParameters.ImagePathName;
-//     if (str.Buffer) |buffer|
-//         return buffer[0..@divTrunc(str.Length, 2)];
-//     return null;
-// }
 // fn getBasename(path: []const u16) []const u16 {
 //     for (1..path.len) |i| {
 //         if (path[path.len - i] == '\\')
