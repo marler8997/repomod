@@ -30,6 +30,24 @@ pub const global = struct {
     }
 };
 
+pub const OpenFileError = switch (builtin.os.tag) {
+    .windows => win32.WIN32_ERROR,
+    else => std.fs.File.OpenError,
+};
+
+pub fn writeLogPrefix(writer: *std.Io.Writer) error{WriteFailed}!void {
+    // const name: []const u16 = blk: {
+    //     const p = getImagePathName() orelse break :blk win32.L("?");
+    //     break :blk getBasename(p);
+    // };
+    var time: win32.SYSTEMTIME = undefined;
+    win32.GetSystemTime(&time);
+    try writer.print(
+        "{:0>2}:{:0>2}:{:0>2}.{:0>3}|{}|{}|",
+        .{ time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, win32.GetCurrentProcessId(), win32.GetCurrentThreadId() },
+    );
+}
+
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;

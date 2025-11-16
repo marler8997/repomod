@@ -1297,12 +1297,14 @@ fn evalBuiltin(
             return error.Vm;
         },
         .@"@Log" => {
-            var buffer: [1000]u8 = undefined;
-            var stderr = std.fs.File.stderr().writer(&buffer);
-            vm.log(&stderr.interface, args_addr) catch |err| switch (err) {
+            var maybe_open_error: ?logfile.OpenFileError = null;
+            const log_file = logfile.global.get(&maybe_open_error);
+            var buffer: [1024]u8 = undefined;
+            var file_writer = log_file.writer(&buffer);
+            vm.log(&file_writer.interface, maybe_open_error, args_addr) catch |err| switch (err) {
                 error.WriteFailed => return vm.setError(.{ .log_error = .{
                     .pos = builtin_extent.start,
-                    .err = stderr.err orelse error.Unexpected,
+                    .err = file_writer.err orelse error.Unexpected,
                 } }),
             };
             vm.discardValues(args_addr);
@@ -1411,16 +1413,22 @@ fn evalBuiltin(
     }
 }
 
-fn log(vm: *Vm, writer: *std.Io.Writer, args_addr: Memory.Addr) error{WriteFailed}!void {
-    try writer.writeAll("@Log: ");
-    // {
-    //     var time: win32.SYSTEMTIME = undefined;
-    //     win32.GetSystemTime(&time);
-    //     writer.print(
-    //         "mod: {:0>2}:{:0>2}:{:0>2}.{:0>3}|{}|" ++ level_txt ++ scope_suffix ++ "|",
-    //         .{ time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, win32.GetCurrentThreadId() },
-    //     ) catch |err| std.debug.panic("print log prefix failed with {s}", .{@errorName(err)});
-    // }
+fn log(
+    vm: *Vm,
+    writer: *std.Io.Writer,
+    maybe_open_error: ?logfile.OpenFileError,
+    args_addr: Memory.Addr,
+) error{WriteFailed}!void {
+    if (maybe_open_error) |open_error| {
+        try logfile.writeLogPrefix(writer);
+        if (@import("builtin").os.tag == .windows)
+            try writer.print("open log file failed, error={f}\n", .{open_error})
+        else
+            try writer.print("open log file failed with {s}\n", .{@errorName(open_error)});
+    }
+
+    try logfile.writeLogPrefix(writer);
+    try writer.writeAll("@Log|");
 
     {
         var next_addr = args_addr;
@@ -3972,6 +3980,7 @@ const monolog = std.log.scoped(.mono);
 const is_test = @import("builtin").is_test;
 
 const std = @import("std");
+const logfile = @import("logfile.zig");
 const mono = @import("mono.zig");
 const monomock = if (is_test) @import("monomock.zig") else struct {};
 const Memory = @import("Memory.zig");

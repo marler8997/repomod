@@ -6,11 +6,6 @@ const global = struct {
     var mods: std.DoublyLinkedList = .{};
 };
 
-const OpenFileError = switch (builtin.os.tag) {
-    .windows => win32.WIN32_ERROR,
-    else => std.fs.File.OpenError,
-};
-
 pub fn panic(
     msg: []const u8,
     error_return_trace: ?*std.builtin.StackTrace,
@@ -20,7 +15,7 @@ pub fn panic(
         std.log.err("panic: {s}", .{msg});
     }
     if (0 == global.paniced_threads_dumping.fetchAdd(1, .seq_cst)) {
-        var maybe_open_error: ?OpenFileError = null;
+        var maybe_open_error: ?logfile.OpenFileError = null;
         const log_file = logfile.global.get(&maybe_open_error);
         var buffer: [1024]u8 = undefined;
         var file_writer = log_file.writer(&buffer);
@@ -600,7 +595,7 @@ fn log(
     const scope_suffix = if (scope == .default) "" else "(" ++ @tagName(scope) ++ "): ";
     const level_scope = level_txt ++ scope_suffix;
 
-    var maybe_open_error: ?OpenFileError = null;
+    var maybe_open_error: ?logfile.OpenFileError = null;
     const log_file = logfile.global.get(&maybe_open_error);
     var buffer: [1024]u8 = undefined;
     var file_writer = log_file.writer(&buffer);
@@ -613,32 +608,20 @@ fn log(
     );
 }
 
-fn writeLogPrefix(writer: *std.Io.Writer) error{WriteFailed}!void {
-    // const name: []const u16 = blk: {
-    //     const p = getImagePathName() orelse break :blk win32.L("?");
-    //     break :blk getBasename(p);
-    // };
-    var time: win32.SYSTEMTIME = undefined;
-    win32.GetSystemTime(&time);
-    try writer.print(
-        "{:0>2}:{:0>2}:{:0>2}.{:0>3}|{}|{}|",
-        .{ time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, win32.GetCurrentProcessId(), win32.GetCurrentThreadId() },
-    );
-}
 fn writeFlushLog(
     comptime format: []const u8,
     args: anytype,
     writer: *std.Io.Writer,
-    maybe_open_error: ?OpenFileError,
+    maybe_open_error: ?logfile.OpenFileError,
 ) error{WriteFailed}!void {
     if (maybe_open_error) |open_error| {
-        try writeLogPrefix(writer);
+        try logfile.writeLogPrefix(writer);
         if (builtin.os.tag == .windows)
             try writer.print("open log file failed, error={f}\n", .{open_error})
         else
             try writer.print("open log file failed with {s}\n", .{@errorName(open_error)});
     }
-    try writeLogPrefix(writer);
+    try logfile.writeLogPrefix(writer);
     try writer.print(format ++ "\n", args);
     try writer.flush();
 }
