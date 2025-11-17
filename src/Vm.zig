@@ -1382,6 +1382,32 @@ fn evalBuiltin(
             vm.mono_funcs.assembly_foreach(&logAssemblies, &context);
             std.log.info("mono_assembly_foreach done", .{});
         },
+        .@"@LogClass" => {
+            const class = switch (vm.pop(args_addr)) {
+                .class => |c| c,
+                else => unreachable,
+            };
+            vm.discardValues(args_addr);
+            _ = vm.mem.discardFrom(args_addr);
+            std.log.info("@LogClass name='{s}' namespace='{s}':", .{
+                vm.mono_funcs.class_get_name(class),
+                vm.mono_funcs.class_get_namespace(class),
+            });
+            {
+                var iterator: ?*anyopaque = null;
+                while (vm.mono_funcs.class_get_fields(class, &iterator)) |field| {
+                    const name = vm.mono_funcs.field_get_name(field);
+                    std.log.info(" - field '{s}'", .{name});
+                }
+            }
+            {
+                var iterator: ?*anyopaque = null;
+                while (vm.mono_funcs.class_get_methods(class, &iterator)) |method| {
+                    const name = vm.mono_funcs.method_get_name(method);
+                    std.log.info(" - method '{s}'", .{name});
+                }
+            }
+        },
         .@"@Assembly" => {
             const extent = switch (vm.pop(args_addr)) {
                 .string_literal => |e| e,
@@ -2093,6 +2119,7 @@ const Builtin = enum {
     @"@Exit",
     @"@Log",
     @"@LogAssemblies",
+    @"@LogClass",
     @"@Assembly",
     @"@Class",
     @"@Discard",
@@ -2105,6 +2132,7 @@ const Builtin = enum {
             .@"@Exit" => &.{},
             .@"@Log" => null,
             .@"@LogAssemblies" => &.{},
+            .@"@LogClass" => &.{.{ .concrete = .class }},
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
             .@"@Class" => &.{.{ .concrete = .assembly_field }},
             .@"@Discard" => &.{.anything},
@@ -2119,6 +2147,7 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Exit", .@"@Exit" },
     .{ "@Log", .@"@Log" },
     .{ "@LogAssemblies", .@"@LogAssemblies" },
+    .{ "@LogClass", .@"@LogClass" },
     .{ "@Assembly", .@"@Assembly" },
     .{ "@Class", .@"@Class" },
     .{ "@Discard", .@"@Discard" },
@@ -4039,6 +4068,11 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\var mscorlib = @Assembly("mscorlib")
         \\var Int32 = @Class(mscorlib.System.Int32)
         \\@Assert(2147483647 == Int32.MaxValue)
+    );
+    try testCode(mono_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Int32 = @Class(mscorlib.System.Int32)
+        \\@LogClass(Int32)
     );
 }
 

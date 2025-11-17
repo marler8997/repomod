@@ -22,13 +22,19 @@ pub const funcs: mono.Funcs = .{
     .assembly_name_get_name = mock_assembly_name_get_name,
     .class_from_name = mock_class_from_name,
     .class_vtable = mock_class_vtable,
+    .class_get_name = mock_class_get_name,
+    .class_get_namespace = mock_class_get_namespace,
+    .class_get_fields = mock_class_get_fields,
+    .class_get_methods = mock_class_get_methods,
     .class_get_method_from_name = mock_class_get_method_from_name,
     .class_get_field_from_name = mock_class_get_field_from_name,
     .field_get_flags = mock_field_get_flags,
+    .field_get_name = mock_field_get_name,
     .field_get_type = mock_field_get_type,
     .field_static_get_value = mock_field_static_get_value,
     .field_get_value = mock_field_get_value,
     .method_get_flags = mock_method_get_flags,
+    .method_get_name = mock_method_get_name,
     .method_signature = mock_method_signature,
     .method_get_class = mock_method_get_class,
     .signature_get_return_type = mock_signature_get_return_type,
@@ -395,6 +401,37 @@ fn mock_class_vtable(domain: *const mono.Domain, c: *const mono.Class) callconv(
     const class: *const MockClass = .fromMonoClass(c);
     return class.toMonoVTable();
 }
+fn mock_class_get_name(c: *const mono.Class) callconv(.c) [*:0]const u8 {
+    const class: *const MockClass = .fromMonoClass(c);
+    return class.name;
+}
+fn mock_class_get_namespace(c: *const mono.Class) callconv(.c) [*:0]const u8 {
+    const class: *const MockClass = .fromMonoClass(c);
+    _ = class;
+    return "TODO_IMPLEMENT_mock_class_get_namespace";
+}
+fn mock_class_get_fields(
+    c: *const mono.Class,
+    iterator: *?*anyopaque,
+) callconv(.c) ?*const mono.ClassField {
+    const class: *const MockClass = .fromMonoClass(c);
+    const index = @intFromPtr(iterator.*);
+    std.debug.assert(index <= class.fields.len);
+    if (index == class.fields.len) return null;
+    iterator.* = @ptrFromInt(index + 1);
+    return class.fields[index].toMono();
+}
+fn mock_class_get_methods(
+    c: *const mono.Class,
+    iterator: *?*anyopaque,
+) callconv(.c) ?*const mono.Method {
+    const class: *const MockClass = .fromMonoClass(c);
+    const index = @intFromPtr(iterator.*);
+    std.debug.assert(index <= class.methods.len);
+    if (index == class.methods.len) return null;
+    iterator.* = @ptrFromInt(index + 1);
+    return class.methods[index].toMono();
+}
 fn mock_class_get_method_from_name(
     c: *const mono.Class,
     name_ptr: [*:0]const u8,
@@ -440,6 +477,10 @@ fn mock_field_get_flags(f: *const mono.ClassField) callconv(.c) mono.ClassFieldF
         },
     };
 }
+fn mock_field_get_name(f: *const mono.ClassField) callconv(.c) [*:0]const u8 {
+    const field: *const MockClassField = .fromMono(f);
+    return field.name;
+}
 fn mock_field_get_type(f: *const mono.ClassField) callconv(.c) *const mono.Type {
     const field: *const MockClassField = .fromMono(f);
     return field.kind.getType().toMono();
@@ -483,6 +524,11 @@ fn mock_method_get_flags(
     _ = method;
     _ = iflags;
     return .{ .protection = .public, .static = true };
+}
+
+fn mock_method_get_name(m: *const mono.Method) callconv(.c) [*:0]const u8 {
+    const method: *const MockMethod = @ptrCast(@alignCast(m));
+    return method.name;
 }
 
 fn mock_method_signature(method_opaque: *const mono.Method) callconv(.c) ?*const mono.MethodSignature {
