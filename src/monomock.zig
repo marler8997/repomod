@@ -49,6 +49,8 @@ pub const funcs: mono.Funcs = .{
     .runtime_invoke = mock_runtime_invoke,
     .string_to_utf8 = mock_string_to_utf8,
     .string_new_len = mock_string_new_len,
+    .string_chars = mock_string_chars,
+    .string_length = mock_string_length,
     .free = mock_free,
 };
 
@@ -702,6 +704,15 @@ fn mock_string_new_len(
     _ = domain;
     _ = text;
     _ = len;
+    @panic("todo");
+}
+
+fn mock_string_chars(s: *const mono.String) callconv(.c) [*]const u16 {
+    _ = s;
+    @panic("todo");
+}
+fn mock_string_length(s: *const mono.String) callconv(.c) c_int {
+    _ = s;
     @panic("todo");
 }
 

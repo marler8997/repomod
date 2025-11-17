@@ -64,6 +64,9 @@ pub const Funcs = struct {
 
     string_to_utf8: *const fn (*const Object) callconv(.c) ?[*:0]const u8,
     string_new_len: *const fn (*const Domain, text: [*]const u8, len: c_uint) callconv(.c) ?*const String,
+    string_chars: *const fn (*const String) callconv(.c) [*]const u16,
+    string_length: *const fn (*const String) callconv(.c) c_int,
+
     free: *const fn (*anyopaque) callconv(.c) void,
     pub fn init(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!Funcs {
         return .{
@@ -105,6 +108,8 @@ pub const Funcs = struct {
             .runtime_invoke = try monoload.get(mod, .runtime_invoke, proc_ref),
             .string_to_utf8 = try monoload.get(mod, .string_to_utf8, proc_ref),
             .string_new_len = try monoload.get(mod, .string_new_len, proc_ref),
+            .string_chars = try monoload.get(mod, .string_chars, proc_ref),
+            .string_length = try monoload.get(mod, .string_length, proc_ref),
             .free = try monoload.get(mod, .free, proc_ref),
         };
     }

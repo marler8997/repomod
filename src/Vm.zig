@@ -850,8 +850,14 @@ fn evalExprSuffix(
                 },
                 .class_method => |m| return try vm.callMethod(suffix_op_token.end, m.class, null, m.id_start),
                 .object_method => |m| {
-                    _ = m;
-                    return vm.setError(.{ .not_implemented = "object methods" });
+                    const obj = vm.mono_funcs.gchandle_get_target(m.gc_handle);
+                    defer vm.mono_funcs.gchandle_free(m.gc_handle);
+                    return try vm.callMethod(
+                        suffix_op_token.end,
+                        vm.mono_funcs.object_get_class(obj),
+                        obj,
+                        m.id_start,
+                    );
                 },
                 else => |value| return vm.setError(.{ .called_non_function = .{
                     .start = expr_first_token.start,
@@ -867,7 +873,7 @@ fn callMethod(
     vm: *Vm,
     after_lparen: usize,
     class: *const mono.Class,
-    object: ?*const mono.Object,
+    maybe_object: ?*const mono.Object,
     method_id_start: usize,
 ) error{Vm}!usize {
     const method_id_extent = blk: {
@@ -949,7 +955,7 @@ fn callMethod(
 
     const maybe_result = vm.mono_funcs.runtime_invoke(
         method,
-        object,
+        maybe_object,
         if (args.count == 0) null else @ptrCast(&managed_args_buf),
         &maybe_exception,
     );
@@ -1082,9 +1088,9 @@ fn pushMonoValue(vm: *Vm, value: *const MonoValue) error{Vm}!void {
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = value_i64;
         },
-        .string => @panic("todo"),
+        .string => @panic("todo: push mono string"),
         .class => {
-            @panic("todo");
+            @panic("todo: push mono value class");
             // TODO: need to create a GC handle
             // (try vm.push(Type)).* = .integer;
             // (try vm.push(*const mono.Object)).* = value;
@@ -1590,8 +1596,14 @@ fn log(
             switch (value) {
                 .integer => |i| try writer.print("{d}", .{i}),
                 .string_literal => |e| try writer.print("{s}", .{vm.text[e.start + 1 .. e.end - 1]}),
-                .managed_string => {
-                    @panic("todo");
+                .managed_string => |gc_handle| {
+                    const str_obj = vm.mono_funcs.gchandle_get_target(gc_handle);
+                    const str: *const mono.String = @ptrCast(str_obj);
+                    const len = vm.mono_funcs.string_length(str);
+                    if (len > 0) {
+                        const ptr = vm.mono_funcs.string_chars(str);
+                        try writer.print("{f}", .{std.unicode.fmtUtf16Le(ptr[0..@intCast(len)])});
+                    }
                 },
                 .script_function => |start| try writer.print("<script function:{}>", .{start}),
                 .assembly => try writer.print("<assembly>", .{}),
