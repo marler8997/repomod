@@ -831,117 +831,11 @@ fn evalExprSuffix(
                 .unexpected_type = null,
             } });
             switch (vm.pop(expr_addr)) {
-                .class_method => |member| {
-                    const method_id_extent = blk: {
-                        var it: DottedIterator = .init(vm.text, member.id_start);
-                        var previous = it.id;
-                        while (it.next(vm.text)) {
-                            _ = &previous;
-                            return vm.setError(.{ .not_implemented = "class member with multiple '.IDENTIFIER'" });
-                        }
-                        break :blk previous;
-                    };
-                    const method_id = try vm.managedId(method_id_extent);
-                    const args_addr = vm.mem.top();
-                    const args = try vm.evalFnCallArgsManaged(suffix_op_token.end);
-
-                    // NOTE: we could push the args on the vm.mem stack, but, having a reasonable
-                    //       max like 100 is probably fine right?
-                    const max_arg_count = 100;
-                    if (args.count > max_arg_count) return vm.setError(.{ .static_error = .{
-                        .pos = suffix_op_token.start,
-                        .string = "too many args for managed function (current max is 100)",
-                    } });
-
-                    const method = vm.mono_funcs.class_get_method_from_name(
-                        member.class,
-                        method_id.slice(),
-                        args.count,
-                    ) orelse return vm.setError(.{ .missing_method = .{
-                        .class = member.class,
-                        .id_extent = method_id_extent,
-                        .arg_count = args.count,
-                    } });
-                    const method_sig = vm.mono_funcs.method_signature(method) orelse @panic(
-                        "method has no signature?", // impossible right?
-                    );
-                    const return_type = vm.mono_funcs.signature_get_return_type(method_sig) orelse @panic(
-                        "method has no return type?", // impossible right?
-                    );
-                    var managed_args_buf: [max_arg_count]*anyopaque = undefined;
-
-                    var next_arg_addr = args_addr;
-                    for (0..args.count) |arg_index| {
-                        const arg_type, next_arg_addr = vm.readValue(Type, next_arg_addr);
-                        const arg_value, next_arg_addr = vm.readAnyValue(arg_type, next_arg_addr);
-                        managed_args_buf[arg_index] = blk: switch (arg_value) {
-                            .string_literal => |extent| {
-                                const slice = vm.text[extent.start + 1 .. extent.end - 1];
-                                const str = vm.mono_funcs.string_new_len(
-                                    vm.mono_funcs.domain_get().?,
-                                    slice.ptr,
-                                    std.math.cast(c_uint, slice.len) orelse return vm.setError(.{ .static_error = .{
-                                        .pos = suffix_op_token.start,
-                                        .string = "native string too long",
-                                    } }),
-                                ) orelse return vm.setError(.{ .static_error = .{
-                                    .pos = suffix_op_token.start,
-                                    .string = "native string to managed returned null",
-                                } });
-                                break :blk @ptrCast(@constCast(str));
-                            },
-                            .managed_string => |handle| {
-                                const str = vm.mono_funcs.gchandle_get_target(handle);
-                                // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-                                // const c_str = vm.mono_funcs.string_to_utf8(@ptrCast(@constCast(managed_args_buf[arg_index]))) orelse @panic("here");
-                                // defer vm.mono_funcs.free(@ptrCast(@constCast(c_str)));
-                                // std.log.warn("ManagedString value is '{s}'", .{std.mem.span(c_str)});
-                                break :blk @constCast(str);
-                            },
-                            else => |a| {
-                                std.log.info("TODO: implement converting '{t}' to managed arg", .{a});
-                                return vm.setError(.{ .not_implemented = "call method with this kind of arg" });
-                            },
-                        };
-                    }
-                    std.debug.assert(next_arg_addr.eql(vm.mem.top()));
-
-                    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-                    // TODO: how do we know if we need an object
-                    const object: ?*anyopaque = null;
-                    // const params: ?**anyopaque = null;
-                    var maybe_exception: ?*const mono.Object = null;
-
-                    const maybe_result = vm.mono_funcs.runtime_invoke(
-                        method,
-                        object,
-                        if (args.count == 0) null else @ptrCast(&managed_args_buf),
-                        &maybe_exception,
-                    );
-                    vm.discardValues(args_addr);
-                    _ = vm.mem.discardFrom(args_addr);
-                    if (false) std.log.warn(
-                        "Result=0x{x} Exception=0x{x}",
-                        .{ @intFromPtr(maybe_result), @intFromPtr(maybe_exception) },
-                    );
-                    if (maybe_exception) |e| {
-                        std.log.err("TODO: handle exception 0x{x}", .{@intFromPtr(e)});
-                        return vm.setError(.{ .not_implemented = "handle exception" });
-                    }
-
-                    const return_type_kind = vm.mono_funcs.type_get_type(return_type);
-                    if (maybe_result) |result| {
-                        const object_type = MonoObjectType.init(return_type_kind) orelse {
-                            std.log.warn("unsupported return type kind {t}", .{return_type_kind});
-                            return vm.setError(.{ .not_implemented = "error message for bad or unsupported return type" });
-                        };
-                        try vm.pushMonoObject(object_type, result);
-                    } else if (return_type_kind != .void) {
-                        std.log.warn("unexpected return type kind {t} for null return value", .{return_type_kind});
-                        return vm.setError(.{ .not_implemented = "error message for non-void return type with null value" });
-                    }
-                    return args.end;
-                },
+                .class_method => |member| return try vm.callMethod(
+                    suffix_op_token.end,
+                    member.class,
+                    member.id_start,
+                ),
                 .script_function => |param_start| {
                     const params = try vm.eat().evalParamDeclList(param_start);
                     const args_addr = vm.mem.top();
@@ -967,6 +861,123 @@ fn evalExprSuffix(
         },
         else => null,
     };
+}
+
+fn callMethod(
+    vm: *Vm,
+    after_lparen: usize,
+    class: *const mono.Class,
+    method_id_start: usize,
+) error{Vm}!usize {
+    const method_id_extent = blk: {
+        var it: DottedIterator = .init(vm.text, method_id_start);
+        var previous = it.id;
+        while (it.next(vm.text)) {
+            _ = &previous;
+            return vm.setError(.{ .not_implemented = "class member with multiple '.IDENTIFIER'" });
+        }
+        break :blk previous;
+    };
+    const method_id = try vm.managedId(method_id_extent);
+    const args_addr = vm.mem.top();
+    const args = try vm.evalFnCallArgsManaged(after_lparen);
+
+    // NOTE: we could push the args on the vm.mem stack, but, having a reasonable
+    //       max like 100 is probably fine right?
+    const max_arg_count = 100;
+    if (args.count > max_arg_count) return vm.setError(.{ .static_error = .{
+        .pos = after_lparen,
+        .string = "too many args for managed function (current max is 100)",
+    } });
+
+    const method = vm.mono_funcs.class_get_method_from_name(
+        class,
+        method_id.slice(),
+        args.count,
+    ) orelse return vm.setError(.{ .missing_method = .{
+        .class = class,
+        .id_extent = method_id_extent,
+        .arg_count = args.count,
+    } });
+    const method_sig = vm.mono_funcs.method_signature(method) orelse @panic(
+        "method has no signature?", // impossible right?
+    );
+    const return_type = vm.mono_funcs.signature_get_return_type(method_sig) orelse @panic(
+        "method has no return type?", // impossible right?
+    );
+    var managed_args_buf: [max_arg_count]*anyopaque = undefined;
+
+    var next_arg_addr = args_addr;
+    for (0..args.count) |arg_index| {
+        const arg_type, next_arg_addr = vm.readValue(Type, next_arg_addr);
+        const arg_value, next_arg_addr = vm.readAnyValue(arg_type, next_arg_addr);
+        managed_args_buf[arg_index] = blk: switch (arg_value) {
+            .string_literal => |extent| {
+                const slice = vm.text[extent.start + 1 .. extent.end - 1];
+                const str = vm.mono_funcs.string_new_len(
+                    vm.mono_funcs.domain_get().?,
+                    slice.ptr,
+                    std.math.cast(c_uint, slice.len) orelse return vm.setError(.{ .static_error = .{
+                        .pos = after_lparen,
+                        .string = "native string too long",
+                    } }),
+                ) orelse return vm.setError(.{ .static_error = .{
+                    .pos = after_lparen,
+                    .string = "native string to managed returned null",
+                } });
+                break :blk @ptrCast(@constCast(str));
+            },
+            .managed_string => |handle| {
+                const str = vm.mono_funcs.gchandle_get_target(handle);
+                // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                // const c_str = vm.mono_funcs.string_to_utf8(@ptrCast(@constCast(managed_args_buf[arg_index]))) orelse @panic("here");
+                // defer vm.mono_funcs.free(@ptrCast(@constCast(c_str)));
+                // std.log.warn("ManagedString value is '{s}'", .{std.mem.span(c_str)});
+                break :blk @constCast(str);
+            },
+            else => |a| {
+                std.log.info("TODO: implement converting '{t}' to managed arg", .{a});
+                return vm.setError(.{ .not_implemented = "call method with this kind of arg" });
+            },
+        };
+    }
+    std.debug.assert(next_arg_addr.eql(vm.mem.top()));
+
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    // TODO: how do we know if we need an object
+    const object: ?*anyopaque = null;
+    // const params: ?**anyopaque = null;
+    var maybe_exception: ?*const mono.Object = null;
+
+    const maybe_result = vm.mono_funcs.runtime_invoke(
+        method,
+        object,
+        if (args.count == 0) null else @ptrCast(&managed_args_buf),
+        &maybe_exception,
+    );
+    vm.discardValues(args_addr);
+    _ = vm.mem.discardFrom(args_addr);
+    if (false) std.log.warn(
+        "Result=0x{x} Exception=0x{x}",
+        .{ @intFromPtr(maybe_result), @intFromPtr(maybe_exception) },
+    );
+    if (maybe_exception) |e| {
+        std.log.err("TODO: handle exception 0x{x}", .{@intFromPtr(e)});
+        return vm.setError(.{ .not_implemented = "handle exception" });
+    }
+
+    const return_type_kind = vm.mono_funcs.type_get_type(return_type);
+    if (maybe_result) |result| {
+        const object_type = MonoObjectType.init(return_type_kind) orelse {
+            std.log.warn("unsupported return type kind {t}", .{return_type_kind});
+            return vm.setError(.{ .not_implemented = "error message for bad or unsupported return type" });
+        };
+        try vm.pushMonoObject(object_type, result);
+    } else if (return_type_kind != .void) {
+        std.log.warn("unexpected return type kind {t} for null return value", .{return_type_kind});
+        return vm.setError(.{ .not_implemented = "error message for non-void return type with null value" });
+    }
+    return args.end;
 }
 
 // The type of a mono Object (can't be void)
