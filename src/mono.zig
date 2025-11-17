@@ -40,7 +40,7 @@ pub const Funcs = struct {
     field_get_name: *const fn (*const ClassField) callconv(.c) [*:0]const u8,
     field_get_type: *const fn (*const ClassField) callconv(.c) *const Type,
     field_static_get_value: *const fn (*const VTable, *const ClassField, out_value: *anyopaque) callconv(.c) void,
-    field_get_value: *const fn (?*const Object, *const ClassField, out_value: *anyopaque) callconv(.c) void,
+    field_get_value: *const fn (*const Object, *const ClassField, out_value: *anyopaque) callconv(.c) void,
 
     method_get_flags: *const fn (*const Method, iflags: ?*MethodFlags) callconv(.c) MethodFlags,
     method_get_name: *const fn (*const Method) callconv(.c) [*:0]const u8,

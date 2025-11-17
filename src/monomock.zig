@@ -233,7 +233,7 @@ const MockValue = union(enum) {
     i4: i32,
     pub fn getType(self: *const MockValue) *const MockType {
         return switch (self.*) {
-            inline else => |_, tag| &@field(types, @tagName(tag)),
+            inline else => |_, tag| &@field(mock_type, @tagName(tag)),
         };
     }
 };
@@ -252,7 +252,7 @@ const method_sigs = struct {
         .param_count = 0,
     };
     const return_datetime: MockMethodSignature = .{
-        .return_type = types.datetime,
+        .return_type = mock_type.datetime,
         .param_count = 0,
     };
 };
@@ -270,6 +270,7 @@ const MockMethodSignature = struct {
 const MockType = union(enum) {
     void,
     i4,
+    u8,
     string,
     valuetype: struct { size: usize },
 
@@ -285,9 +286,10 @@ const MockType = union(enum) {
         };
     }
 };
-const types = struct {
+const mock_type = struct {
     pub const @"void": MockType = .void;
     pub const @"i4": MockType = .i4;
+    pub const @"u8": MockType = .u8;
     pub const string: MockType = .string;
     pub const datetime: MockType = .{ .valuetype = .{ .size = 8 } };
 };
@@ -375,7 +377,9 @@ const mock_class = struct {
         .methods = &[_]MockMethod{
             .{ .name = "get_Now", .impl = .{ .return_datetime = &@"System.DateTime.get_Now" } },
         },
-        .fields = &[_]MockClassField{},
+        .fields = &[_]MockClassField{
+            .{ .name = "_dateData", .protection = .private, .kind = .{ .instance = &mock_type.u8 } },
+        },
     };
 };
 
@@ -387,7 +391,7 @@ const assemblies = [_]MockAssembly{
                 mock_class.@"System.String",
                 mock_class.@"System.DateTime",
                 .{ .name = "Decimal", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{
-                    .{ .name = "flags", .protection = .private, .kind = .{ .instance = &types.i4 } },
+                    .{ .name = "flags", .protection = .private, .kind = .{ .instance = &mock_type.i4 } },
                 } },
                 .{ .name = "Console", .methods = &[_]MockMethod{
                     .{ .name = "WriteLine", .impl = .{ .return_void = &@"System.Console.WriteLine0" } },
@@ -543,18 +547,23 @@ fn mock_field_static_get_value(
     }
 }
 fn mock_field_get_value(
-    maybe_obj: ?*const mono.Object,
+    o: *const mono.Object,
     f: *const mono.ClassField,
     out_value: *anyopaque,
 ) callconv(.c) void {
-    if (maybe_obj != null) @panic("todo: non-static fields");
     const field: *const MockClassField = .fromMono(f);
     switch (field.kind) {
-        .static => |*static_value| switch (static_value.*) {
-            .i4 => |value| @as(*i32, @ptrCast(@alignCast(out_value))).* = value,
-            // else => |kind| std.debug.panic("todo: implement field_get_value for type kind '{s}'", .{@tagName(kind)}),
+        // I think mono crashes if you do this
+        .static => @panic("must call field_static_get_value for static field"),
+        .instance => {},
+    }
+    const object: *const MockObject = .fromMono(o);
+    switch (object.data) {
+        .datetime => {
+            // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            @as(*u64, @ptrCast(@alignCast(out_value))).* = 0x12345678;
         },
-        .instance => @panic("cannot call field_get_value for non-static field, MONO crashes in this case"),
+        else => |t| std.debug.panic("todo: mock_field_get_value for data kind {t}", .{t}),
     }
 }
 

@@ -838,12 +838,21 @@ fn evalExprSuffix(
                 },
                 .object => vm.setError(.{ .not_implemented = "object fields" }),
                 .managed_struct => {
-                    const gc_handle, const end = vm.readValue(mono.GcHandle, value_addr);
-                    std.debug.assert(end.eql(vm.mem.top()));
+                    const obj = blk: {
+                        const gc_handle, const end = vm.readValue(mono.GcHandle, value_addr);
+                        std.debug.assert(end.eql(vm.mem.top()));
+                        _ = vm.mem.discardFrom(expr_addr);
+                        const obj = vm.mono_funcs.gchandle_get_target(gc_handle);
+                        vm.mono_funcs.gchandle_free(gc_handle);
+                        break :blk obj;
+                    };
+                    const class = vm.mono_funcs.object_get_class(obj);
                     const name = try vm.managedId(id_extent);
-                    _ = gc_handle;
-                    _ = name;
                     // monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
+                    const field = vm.mono_funcs.class_get_field_from_name(class, name.slice()) orelse return vm.setError(
+                        .{ .missing_field = .{ .class = class, .id_extent = id_extent } },
+                    );
+                    _ = field;
                     return vm.setError(.{ .not_implemented = "managed struct fields" });
                 },
             };
@@ -2818,6 +2827,10 @@ pub const Error = union(enum) {
         assembly: *const mono.Assembly,
         id_start: usize,
     },
+    missing_field: struct {
+        class: *const mono.Class,
+        id_extent: Extent,
+    },
     missing_method: struct {
         class: *const mono.Class,
         id_extent: Extent,
@@ -3034,6 +3047,13 @@ const ErrorFmt = struct {
                     },
                 );
             },
+            .missing_field => |e| try writer.print(
+                "{d}: missing field '{s}'",
+                .{
+                    getLineNum(f.text, e.id_extent.start),
+                    f.text[e.id_extent.start..e.id_extent.end],
+                },
+            ),
             .missing_method => |m| try writer.print(
                 "{d}: method {s} with {} params does not exist in this class",
                 .{
@@ -3241,6 +3261,11 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\var Decimal = @Class(mscorlib.System.Decimal)
         \\@Log(Decimal.flags)
     , "3: cannot access non-static field 'flags' on class, need an object");
+    try testBadCode(mono_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var DateTime = @Class(mscorlib.System.DateTime)
+        \\DateTime.get_Now().this_field_wont_exist
+    , "3: missing field 'this_field_wont_exist'");
 }
 
 const TestDomain = struct {
