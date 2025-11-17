@@ -559,9 +559,8 @@ fn mock_field_get_value(
     }
     const object: *const MockObject = .fromMono(o);
     switch (object.data) {
-        .datetime => {
-            // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-            @as(*u64, @ptrCast(@alignCast(out_value))).* = 0x12345678;
+        .datetime => |value| {
+            @as(*u64, @ptrCast(@alignCast(out_value))).* = @bitCast(value);
         },
         else => |t| std.debug.panic("todo: mock_field_get_value for data kind {t}", .{t}),
     }
