@@ -201,12 +201,18 @@ fn initMono() MonoState {
     switch (dll.kind) {
         .name => {},
         .repo_game => {
-            const filename = repo_managed ++ "\\Assembly-CSharp.dll";
-            if (funcs.domain_assembly_open(domain, filename)) |assembly| {
-                _ = assembly;
-                std.log.info("Assembly-CSharp: loaded", .{});
-            } else {
-                std.log.info("Assembly-CSharp: not loaded", .{});
+            const repo_extra_dlls = [_][]const u8{
+                "Assembly-CSharp.dll",
+                "Facepunch.Steamworks.Win64.dll",
+            };
+            inline for (repo_extra_dlls) |sub_path| {
+                const filename = repo_managed ++ "\\" ++ sub_path;
+                if (funcs.domain_assembly_open(domain, filename)) |assembly| {
+                    _ = assembly;
+                    std.log.info("{s}: loaded", .{sub_path});
+                } else {
+                    std.log.info("{s}: not loaded", .{sub_path});
+                }
             }
         },
     }
