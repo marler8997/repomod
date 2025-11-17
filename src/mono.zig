@@ -60,7 +60,7 @@ pub const Funcs = struct {
     gchandle_free: *const fn (handle: GcHandle) callconv(.c) void,
     gchandle_get_target: *const fn (handle: GcHandle) callconv(.c) *const Object,
 
-    runtime_invoke: *const fn (*const Method, obj: ?*anyopaque, params: ?**anyopaque, exception: ?*?*const Object) callconv(.c) ?*const Object,
+    runtime_invoke: *const fn (*const Method, obj: ?*const Object, params: ?**anyopaque, exception: ?*?*const Object) callconv(.c) ?*const Object,
 
     string_to_utf8: *const fn (*const Object) callconv(.c) ?[*:0]const u8,
     string_new_len: *const fn (*const Domain, text: [*]const u8, len: c_uint) callconv(.c) ?*const String,

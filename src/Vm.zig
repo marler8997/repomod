@@ -831,11 +831,6 @@ fn evalExprSuffix(
                 .unexpected_type = null,
             } });
             switch (vm.pop(expr_addr)) {
-                .class_method => |member| return try vm.callMethod(
-                    suffix_op_token.end,
-                    member.class,
-                    member.id_start,
-                ),
                 .script_function => |param_start| {
                     const params = try vm.eat().evalParamDeclList(param_start);
                     const args_addr = vm.mem.top();
@@ -853,6 +848,11 @@ fn evalExprSuffix(
                     }
                     return after_args;
                 },
+                .class_method => |m| return try vm.callMethod(suffix_op_token.end, m.class, null, m.id_start),
+                .object_method => |m| {
+                    _ = m;
+                    return vm.setError(.{ .not_implemented = "object methods" });
+                },
                 else => |value| return vm.setError(.{ .called_non_function = .{
                     .start = expr_first_token.start,
                     .unexpected_type = value.getType(),
@@ -867,6 +867,7 @@ fn callMethod(
     vm: *Vm,
     after_lparen: usize,
     class: *const mono.Class,
+    object: ?*const mono.Object,
     method_id_start: usize,
 ) error{Vm}!usize {
     const method_id_extent = blk: {
@@ -943,9 +944,6 @@ fn callMethod(
     }
     std.debug.assert(next_arg_addr.eql(vm.mem.top()));
 
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    // TODO: how do we know if we need an object
-    const object: ?*anyopaque = null;
     // const params: ?**anyopaque = null;
     var maybe_exception: ?*const mono.Object = null;
 

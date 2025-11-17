@@ -665,7 +665,7 @@ fn mock_gchandle_get_target(handle: mono.GcHandle) callconv(.c) *const mono.Obje
 
 fn mock_runtime_invoke(
     method_opaque: *const mono.Method,
-    obj: ?*anyopaque,
+    obj: ?*const mono.Object,
     params: ?**anyopaque,
     exception: ?*?*const mono.Object,
 ) callconv(.c) ?*const mono.Object {
