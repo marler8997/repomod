@@ -378,6 +378,7 @@ const mock_class = struct {
             .{ .name = "get_Now", .impl = .{ .return_datetime = &@"System.DateTime.get_Now" } },
         },
         .fields = &[_]MockClassField{
+            .{ .name = "DaysPerYear", .protection = .private, .kind = .{ .static = .{ .i4 = 365 } } },
             .{ .name = "_dateData", .protection = .private, .kind = .{ .instance = &mock_type.u8 } },
         },
     };

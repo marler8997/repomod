@@ -788,44 +788,7 @@ fn evalExprSuffix(
                     monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
                     if (vm.mono_funcs.class_get_field_from_name(class, name.slice())) |field| {
                         _ = vm.mem.discardFrom(expr_addr);
-                        const flags = vm.mono_funcs.field_get_flags(field);
-                        monolog.debug("  is field: flags={}", .{flags});
-                        // std.debug.print("flags {}\n", .{flags});
-                        // NOTE: if we don't check this flag, then calling field_get_value with
-                        //       a null object will crash
-                        if (!flags.static) return vm.setError(.{ .non_static_field = .{
-                            .id_extent = id_extent,
-                        } });
-                        switch (vm.mono_funcs.type_get_type(vm.mono_funcs.field_get_type(field))) {
-                            .class => {
-                                var value: *mono.Object = undefined;
-                                vm.mono_funcs.field_static_get_value(
-                                    vm.mono_funcs.class_vtable(vm.mono_funcs.domain_get().?, class),
-                                    field,
-                                    @ptrCast(&value),
-                                );
-                                // TODO: make sure the object is valid?
-                                (try vm.push(Type)).* = .integer;
-                                (try vm.push(*const mono.Object)).* = value;
-                            },
-                            .i4 => {
-                                var value: i32 = undefined;
-                                vm.mono_funcs.field_static_get_value(
-                                    vm.mono_funcs.class_vtable(vm.mono_funcs.domain_get().?, class),
-                                    field,
-                                    &value,
-                                );
-                                (try vm.push(Type)).* = .integer;
-                                (try vm.push(i64)).* = value;
-                            },
-                            else => |kind| {
-                                std.log.warn("todo: field type kind={t}", .{kind});
-                                return vm.setError(.{ .not_implemented2 = .{
-                                    .pos = expr_first_token.start,
-                                    .msg = "class field of this type",
-                                } });
-                            },
-                        }
+                        try vm.pushMonoField(class, field, null, id_extent);
                     } else {
                         monolog.debug("  is NOT a field", .{});
                         // if it's not a field, then we'll assume it's a method
@@ -852,8 +815,8 @@ fn evalExprSuffix(
                     const field = vm.mono_funcs.class_get_field_from_name(class, name.slice()) orelse return vm.setError(
                         .{ .missing_field = .{ .class = class, .id_extent = id_extent } },
                     );
-                    _ = field;
-                    return vm.setError(.{ .not_implemented = "managed struct fields" });
+                    try vm.pushMonoField(class, field, obj, id_extent);
+                    return id_extent.end;
                 },
             };
         },
@@ -1049,6 +1012,83 @@ const MonoObjectType = enum {
     }
 };
 
+const MonoValueStorage = union(enum) {
+    class: *mono.Object,
+    i4: i32,
+    u8: u64,
+    pub fn getPtr(storage: *MonoValueStorage) *anyopaque {
+        return switch (storage.*) {
+            inline else => |*typed| @ptrCast(typed),
+        };
+    }
+};
+
+fn pushMonoField(
+    vm: *Vm,
+    class: *const mono.Class,
+    field: *const mono.ClassField,
+    maybe_obj: ?*const mono.Object,
+    id_extent: Extent,
+) error{Vm}!void {
+    const flags = vm.mono_funcs.field_get_flags(field);
+    const method: union(enum) {
+        static,
+        instance: *const mono.Object,
+    } = blk: {
+        if (flags.static) {
+            if (maybe_obj != null) return vm.setError(.{ .static_field = .{ .id_extent = id_extent } });
+            break :blk .static;
+        }
+        break :blk .{
+            .instance = maybe_obj orelse return vm.setError(.{ .non_static_field = .{ .id_extent = id_extent } }),
+        };
+    };
+
+    var value: MonoValueStorage = switch (vm.mono_funcs.type_get_type(vm.mono_funcs.field_get_type(field))) {
+        .class => .{ .class = undefined },
+        .i4 => .{ .i4 = undefined },
+        .u8 => .{ .u8 = undefined },
+        else => |mono_type_kind| {
+            std.log.warn("todo: field type kind={t}", .{mono_type_kind});
+            return vm.setError(.{ .not_implemented2 = .{
+                .pos = id_extent.start,
+                .msg = "class field of this type",
+            } });
+        },
+    };
+    switch (method) {
+        .static => vm.mono_funcs.field_static_get_value(
+            vm.mono_funcs.class_vtable(vm.mono_funcs.domain_get().?, class),
+            field,
+            value.getPtr(),
+        ),
+        .instance => |obj| vm.mono_funcs.field_get_value(
+            obj,
+            field,
+            value.getPtr(),
+        ),
+    }
+    switch (value) {
+        .class => {
+            @panic("todo");
+            // TODO: need to create a GC handle
+            // (try vm.push(Type)).* = .integer;
+            // (try vm.push(*const mono.Object)).* = value;
+        },
+        .i4 => {
+            (try vm.push(Type)).* = .integer;
+            (try vm.push(i64)).* = value.i4;
+        },
+        .u8 => {
+            const value_i64: i64 = std.math.cast(i64, value.u8) orelse return vm.setError(.{
+                .not_implemented = "support u64 that doesn't fit in i64",
+            });
+            (try vm.push(Type)).* = .integer;
+            (try vm.push(i64)).* = value_i64;
+        },
+    }
+}
+
 fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const mono.Object) error{Vm}!void {
     switch (object_type) {
         .boolean => {
@@ -1104,9 +1144,6 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             const token_start_ptr = vm.mem.toPointer(usize, value_addr);
             (try vm.push(usize)).* = token_start_ptr.*;
         },
-        // .c_string => {
-        //     return vm.setError(.{ .not_implemented = "pushValueFromAddr c_string" });
-        // },
         .managed_string => {
             return vm.setError(.{ .not_implemented = "pushValueFromAddr managed_string" });
         },
@@ -2839,6 +2876,9 @@ pub const Error = union(enum) {
     non_static_field: struct {
         id_extent: Extent,
     },
+    static_field: struct {
+        id_extent: Extent,
+    },
     new_failed: struct {
         pos: usize,
         class: *const mono.Class,
@@ -3069,6 +3109,13 @@ const ErrorFmt = struct {
                     f.text[e.id_extent.start..e.id_extent.end],
                 },
             ),
+            .static_field => |e| try writer.print(
+                "{d}: cannot access static field '{s}' on an object, need a class",
+                .{
+                    getLineNum(f.text, e.id_extent.start),
+                    f.text[e.id_extent.start..e.id_extent.end],
+                },
+            ),
             .new_failed => |n| try writer.print("{d}: new failed", .{
                 getLineNum(f.text, n.pos),
             }),
@@ -3261,6 +3308,11 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\var Decimal = @Class(mscorlib.System.Decimal)
         \\@Log(Decimal.flags)
     , "3: cannot access non-static field 'flags' on class, need an object");
+    try testBadCode(mono_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var DateTime = @Class(mscorlib.System.DateTime)
+        \\DateTime.get_Now().DaysPerYear
+    , "3: cannot access static field 'DaysPerYear' on an object, need a class");
     try testBadCode(mono_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
@@ -3464,7 +3516,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\var now = DateTime.get_Now()
         \\@Log(now)
-        \\//@Log(now._dateData)
+        \\@Log(now._dateData)
     );
 }
 
