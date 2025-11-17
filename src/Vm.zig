@@ -50,7 +50,7 @@ const Type = enum {
     class,
     class_method,
     object,
-    managed_struct,
+    object_method,
     pub fn what(t: Type) []const u8 {
         return switch (t) {
             .integer => "an integer",
@@ -63,7 +63,7 @@ const Type = enum {
             .class => "a class",
             .class_method => "a class method",
             .object => "an object",
-            .managed_struct => "a managed struct",
+            .object_method => "an object method",
         };
     }
     pub fn canMarshal(t: Type) bool {
@@ -80,7 +80,7 @@ const Type = enum {
             .class => true,
             .class_method => true,
             .object => true,
-            .managed_struct => true,
+            .object_method => true,
         };
     }
 };
@@ -799,30 +799,29 @@ fn evalExprSuffix(
                     }
                     return id_extent.end;
                 },
-                .object => vm.setError(.{ .not_implemented = "object fields" }),
-                .managed_struct => {
-                    const obj = blk: {
-                        const gc_handle, const end = vm.readValue(mono.GcHandle, value_addr);
-                        std.debug.assert(end.eql(vm.mem.top()));
-                        _ = vm.mem.discardFrom(expr_addr);
-                        const obj = vm.mono_funcs.gchandle_get_target(gc_handle);
-                        vm.mono_funcs.gchandle_free(gc_handle);
-                        break :blk obj;
-                    };
+                .object => {
+                    const gc_handle, const end = vm.readValue(mono.GcHandle, value_addr);
+                    std.debug.assert(end.eql(vm.mem.top()));
+                    const obj = vm.mono_funcs.gchandle_get_target(gc_handle);
                     const class = vm.mono_funcs.object_get_class(obj);
                     const name = try vm.managedId(id_extent);
                     // monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
                     if (vm.mono_funcs.class_get_field_from_name(class, name.slice())) |field| {
+                        vm.mono_funcs.gchandle_free(gc_handle);
+                        _ = vm.mem.discardFrom(expr_addr);
                         try vm.pushMonoField(class, field, obj, id_extent);
-                        return id_extent.end;
                     } else {
-                        // // if it's not a field, then we'll assume it's a method
-                        // // TODO: should we lookup the method or just assume it must be a method?
-                        // expr_type_ptr.* = .class_method;
-                        // // class already pushed
-                        // (try vm.push(usize)).* = id_extent.start;
-                        return vm.setError(.{ .not_implemented = "struct methods" });
+                        expr_type_ptr.* = .object_method;
+                        // object gc_handle already pushed
+                        (try vm.push(usize)).* = id_extent.start;
                     }
+                    return id_extent.end;
+                },
+                .object_method => {
+                    return vm.setError(.{ .static_error = .{
+                        .pos = expr_first_token.start,
+                        .string = "dot operator on non-field object member",
+                    } });
                 },
             };
         },
@@ -1146,7 +1145,7 @@ fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const mono.Obje
         .valuetype => {
             const handle = vm.mono_funcs.gchandle_new(object, 0);
             errdefer vm.mono_funcs.gchandle_free(handle);
-            (try vm.push(Type)).* = .managed_struct;
+            (try vm.push(Type)).* = .object;
             (try vm.push(mono.GcHandle)).* = handle;
         },
         else => {
@@ -1202,18 +1201,16 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             (try vm.push(usize)).* = id_start;
         },
         .object => {
-            (try vm.push(Type)).* = .object;
-            const object_ptr = vm.mem.toPointer(*const mono.Object, value_addr);
-            (try vm.push(*const mono.Object)).* = object_ptr.*;
-        },
-        .managed_struct => {
             // NOTE: we could make a new type that doesn't create a new GC handle and
             //       just relies on the value higher up in the stack to keep it alive
             const src_gc_handle = vm.mem.toPointer(mono.GcHandle, value_addr).*;
             const obj = vm.mono_funcs.gchandle_get_target(src_gc_handle);
             const new_gc_handle = vm.mono_funcs.gchandle_new(obj, 0);
-            (try vm.push(Type)).* = .managed_struct;
+            (try vm.push(Type)).* = .object;
             (try vm.push(mono.GcHandle)).* = new_gc_handle;
+        },
+        .object_method => {
+            return vm.setError(.{ .not_implemented = "pushValueFromaddr object_method" });
         },
     }
 }
@@ -1592,7 +1589,12 @@ fn log(
                 .assembly_field => try writer.print("<assembly-field>", .{}),
                 .class => try writer.print("<class>", .{}),
                 .class_method => try writer.print("<class-method>", .{}),
-                .managed_struct => |gc_handle| try writeManagedStruct(vm.mono_funcs, writer, gc_handle),
+                .object => |gc_handle| try writeObject(vm.mono_funcs, writer, gc_handle),
+                .object_method => |method| {
+                    const method_token = lex(vm.text, method.id_start);
+                    std.debug.assert(method_token.tag == .identifier);
+                    try writer.print("<object-method '{s}'>", .{vm.text[method_token.start..method_token.end]});
+                },
             }
         }
     }
@@ -1600,7 +1602,7 @@ fn log(
     try writer.flush();
 }
 
-fn writeManagedStruct(
+fn writeObject(
     mono_funcs: *const mono.Funcs,
     writer: *std.Io.Writer,
     gc_handle: mono.GcHandle,
@@ -1782,10 +1784,17 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
             const id_start, const end = vm.readValue(usize, id_start_addr);
             return .{ .{ .class_method = .{ .class = class, .id_start = id_start } }, end };
         },
-        .object => @panic("readAnyValue for object"),
-        .managed_struct => {
+        .object => {
             const handle, const end = vm.readValue(mono.GcHandle, addr);
-            return .{ .{ .managed_struct = handle }, end };
+            return .{ .{ .object = handle }, end };
+        },
+        .object_method => {
+            const handle, const id_start_addr = vm.readValue(mono.GcHandle, addr);
+            const id_start, const end = vm.readValue(usize, id_start_addr);
+            return .{ .{ .object_method = .{
+                .gc_handle = handle,
+                .id_start = id_start,
+            } }, end };
         },
     }
 }
@@ -1825,7 +1834,11 @@ const Value = union(enum) {
         class: *const mono.Class,
         id_start: usize,
     },
-    managed_struct: mono.GcHandle,
+    object: mono.GcHandle,
+    object_method: struct {
+        gc_handle: mono.GcHandle,
+        id_start: usize,
+    },
     pub fn discard(value: *Value, mono_funcs: *const mono.Funcs) void {
         switch (value.*) {
             .integer => {},
@@ -1836,7 +1849,8 @@ const Value = union(enum) {
             .assembly_field => {},
             .class => {},
             .class_method => {},
-            .managed_struct => |handle| mono_funcs.gchandle_free(handle),
+            .object => |handle| mono_funcs.gchandle_free(handle),
+            .object_method => |method| mono_funcs.gchandle_free(method.gc_handle),
         }
         value.* = undefined;
     }
@@ -1851,7 +1865,8 @@ const Value = union(enum) {
             .assembly_field => .assembly_field,
             .class => .class,
             .class_method => .class_method,
-            .managed_struct => .managed_struct,
+            .object => .object,
+            .object_method => .object_method,
         };
     }
 };
