@@ -1061,6 +1061,12 @@ fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const mono.Obje
             (try vm.push(Type)).* = .managed_string;
             (try vm.push(mono.GcHandle)).* = handle;
         },
+        .valuetype => {
+            const handle = vm.mono_funcs.gchandle_new(object, 0);
+            errdefer vm.mono_funcs.gchandle_free(handle);
+            (try vm.push(Type)).* = .managed_struct;
+            (try vm.push(mono.GcHandle)).* = handle;
+        },
         else => {
             std.log.warn("todo: support pushing mono type {t}", .{object_type});
             return vm.setError(.{ .not_implemented = "managed return value of this type" });
@@ -1396,14 +1402,18 @@ fn evalBuiltin(
                 var iterator: ?*anyopaque = null;
                 while (vm.mono_funcs.class_get_fields(class, &iterator)) |field| {
                     const name = vm.mono_funcs.field_get_name(field);
-                    std.log.info(" - field '{s}'", .{name});
+                    const flags = vm.mono_funcs.field_get_flags(field);
+                    const stinst: []const u8 = if (flags.static) "static  " else "instance";
+                    std.log.info(" - {s} field '{s}'", .{ stinst, name });
                 }
             }
             {
                 var iterator: ?*anyopaque = null;
                 while (vm.mono_funcs.class_get_methods(class, &iterator)) |method| {
                     const name = vm.mono_funcs.method_get_name(method);
-                    std.log.info(" - method '{s}'", .{name});
+                    const flags = vm.mono_funcs.method_get_flags(method, null);
+                    const stinst: []const u8 = if (flags.static) "static  " else "instance";
+                    std.log.info(" - {s} method '{s}'", .{ stinst, name });
                 }
             }
         },
@@ -1497,11 +1507,80 @@ fn log(
                 .assembly_field => try writer.print("<assembly-field>", .{}),
                 .class => try writer.print("<class>", .{}),
                 .class_method => try writer.print("<class-method>", .{}),
+                .managed_struct => |gc_handle| try writeManagedStruct(vm.mono_funcs, writer, gc_handle),
             }
         }
     }
     try writer.writeAll("\n");
     try writer.flush();
+}
+
+fn writeManagedStruct(
+    mono_funcs: *const mono.Funcs,
+    writer: *std.Io.Writer,
+    gc_handle: mono.GcHandle,
+) error{WriteFailed}!void {
+    const obj = mono_funcs.gchandle_get_target(gc_handle);
+    const class = mono_funcs.object_get_class(obj);
+    const class_name = mono_funcs.class_get_name(class);
+    try writer.print("{s}{{ ", .{class_name});
+    var iterator: ?*anyopaque = null;
+    var first = true;
+    while (mono_funcs.class_get_fields(class, &iterator)) |field| {
+        const flags = mono_funcs.field_get_flags(field);
+        // Skip static fields - only show instance fields
+        if (flags.static) continue;
+
+        if (!first) try writer.writeAll(", ");
+        first = false;
+        const field_name = mono_funcs.field_get_name(field);
+        const field_type = mono_funcs.field_get_type(field);
+        const type_kind = mono_funcs.type_get_type(field_type);
+        try writer.print("{s}=", .{field_name});
+        switch (type_kind) {
+            .boolean => {
+                var value: c_int = undefined;
+                mono_funcs.field_get_value(obj, field, &value);
+                try writer.print("{}", .{value != 0});
+            },
+            .i4 => {
+                var value: i32 = undefined;
+                mono_funcs.field_get_value(obj, field, &value);
+                try writer.print("{d}", .{value});
+            },
+            .i8 => {
+                var value: i64 = undefined;
+                mono_funcs.field_get_value(obj, field, &value);
+                try writer.print("{d}", .{value});
+            },
+            .u8 => {
+                var value: u64 = undefined;
+                mono_funcs.field_get_value(obj, field, &value);
+                try writer.print("{d}", .{value});
+            },
+            .string => {
+                var value: ?*mono.Object = null;
+                mono_funcs.field_get_value(obj, field, @ptrCast(&value));
+                if (value) |str_obj| {
+                    const c_str = mono_funcs.string_to_utf8(@ptrCast(str_obj));
+                    if (c_str) |s| {
+                        defer mono_funcs.free(@ptrCast(@constCast(s)));
+                        try writer.print("\"{s}\"", .{std.mem.span(s)});
+                    } else {
+                        try writer.writeAll("null");
+                    }
+                } else {
+                    try writer.writeAll("null");
+                }
+            },
+            else => {
+                // For other types, just show the type
+                try writer.print("<{s}>", .{@tagName(type_kind)});
+            },
+        }
+    }
+
+    try writer.writeAll(" }");
 }
 
 const DottedIterator = struct {
@@ -1619,7 +1698,10 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
             return .{ .{ .class_method = .{ .class = class, .id_start = id_start } }, end };
         },
         .object => @panic("readAnyValue for object"),
-        .managed_struct => @panic("readAnyValue for managed struct"),
+        .managed_struct => {
+            const handle, const end = vm.readValue(mono.GcHandle, addr);
+            return .{ .{ .managed_struct = handle }, end };
+        },
     }
 }
 
@@ -1658,6 +1740,7 @@ const Value = union(enum) {
         class: *const mono.Class,
         id_start: usize,
     },
+    managed_struct: mono.GcHandle,
     pub fn discard(value: *Value, mono_funcs: *const mono.Funcs) void {
         switch (value.*) {
             .integer => {},
@@ -1669,6 +1752,7 @@ const Value = union(enum) {
             .assembly_field => {},
             .class => {},
             .class_method => {},
+            .managed_struct => |handle| mono_funcs.gchandle_free(handle),
         }
         value.* = undefined;
     }
@@ -1683,6 +1767,7 @@ const Value = union(enum) {
             .assembly_field => .assembly_field,
             .class => .class,
             .class_method => .class_method,
+            .managed_struct => .managed_struct,
         };
     }
 };

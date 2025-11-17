@@ -54,6 +54,7 @@ pub const Funcs = struct {
 
     object_new: *const fn (*const Domain, *const Class) callconv(.c) ?*const Object,
     object_unbox: *const fn (*const Object) callconv(.c) *anyopaque,
+    object_get_class: *const fn (*const Object) callconv(.c) *const Class,
 
     gchandle_new: *const fn (*const Object, pinned: i32) callconv(.c) GcHandle,
     gchandle_free: *const fn (handle: GcHandle) callconv(.c) void,
@@ -97,6 +98,7 @@ pub const Funcs = struct {
             .type_get_type = try monoload.get(mod, .type_get_type, proc_ref),
             .object_new = try monoload.get(mod, .object_new, proc_ref),
             .object_unbox = try monoload.get(mod, .object_unbox, proc_ref),
+            .object_get_class = try monoload.get(mod, .object_get_class, proc_ref),
             .gchandle_new = try monoload.get(mod, .gchandle_new, proc_ref),
             .gchandle_free = try monoload.get(mod, .gchandle_free, proc_ref),
             .gchandle_get_target = try monoload.get(mod, .gchandle_get_target, proc_ref),

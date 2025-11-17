@@ -42,6 +42,7 @@ pub const funcs: mono.Funcs = .{
     .type_get_type = mock_type_get_type,
     .object_new = mock_object_new,
     .object_unbox = mock_object_unbox,
+    .object_get_class = mock_object_get_class,
     .gchandle_new = mock_gchandle_new,
     .gchandle_free = mock_gchandle_free,
     .gchandle_get_target = mock_gchandle_get_target,
@@ -594,13 +595,17 @@ fn mock_object_new(
     _ = class;
     return null;
 }
-
 fn mock_object_unbox(o: *const mono.Object) callconv(.c) *anyopaque {
     const object: *const MockObject = .fromMono(o);
     return switch (object.data) {
         .i4 => |*value| @ptrCast(@constCast(value)),
         .static_string => @panic("codebug?"),
     };
+}
+fn mock_object_get_class(o: *const mono.Object) callconv(.c) *const mono.Class {
+    const object: *const MockObject = .fromMono(o);
+    _ = object;
+    @panic("todo");
 }
 
 fn mock_gchandle_new(o: *const mono.Object, pinned: i32) callconv(.c) mono.GcHandle {
