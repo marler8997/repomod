@@ -217,6 +217,8 @@ const MethodImpl = union(enum) {
     return_void: *const fn () void,
     return_i4: *const fn () i32,
     return_static_string: *const fn () [:0]const u8,
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    return_datetime: *const fn () void,
     pub fn sig(impl: *const MethodImpl) *const MockMethodSignature {
         return switch (impl.*) {
             inline else => |_, tag| &@field(method_sigs, @tagName(tag)),
@@ -228,7 +230,7 @@ const MockValue = union(enum) {
     i4: i32,
     pub fn getType(self: *const MockValue) *const MockType {
         return switch (self.*) {
-            inline else => |_, tag| &@field(MockType, @tagName(tag)),
+            inline else => |_, tag| &@field(types, @tagName(tag)),
         };
     }
 };
@@ -246,6 +248,10 @@ const method_sigs = struct {
         .return_type = .string,
         .param_count = 0,
     };
+    const return_datetime: MockMethodSignature = .{
+        .return_type = types.datetime,
+        .param_count = 0,
+    };
 };
 
 const MockMethodSignature = struct {
@@ -258,12 +264,11 @@ const MockMethodSignature = struct {
         return @ptrCast(sig);
     }
 };
-const MockType = struct {
-    kind: mono.TypeKind,
-
-    pub const @"void": MockType = .{ .kind = .void };
-    pub const @"i4": MockType = .{ .kind = .i4 };
-    pub const string: MockType = .{ .kind = .string };
+const MockType = union(enum) {
+    void,
+    i4,
+    string,
+    valuetype: struct { size: usize },
 
     pub fn fromMono(t: *const mono.Type) *const MockType {
         return @ptrCast(@alignCast(t));
@@ -271,6 +276,17 @@ const MockType = struct {
     pub fn toMono(t: *const MockType) *const mono.Type {
         return @ptrCast(t);
     }
+    pub fn kind(t: *const MockType) mono.TypeKind {
+        return switch (t.*) {
+            inline else => |_, tag| @field(mono.TypeKind, @tagName(tag)),
+        };
+    }
+};
+const types = struct {
+    pub const @"void": MockType = .void;
+    pub const @"i4": MockType = .i4;
+    pub const string: MockType = .string;
+    pub const datetime: MockType = .{ .valuetype = .{ .size = 8 } };
 };
 
 const MockObject = struct {
@@ -326,6 +342,8 @@ fn @"System.Environment.get_TickCount"() i32 {
 fn @"System.Environment.get_MachineName"() [:0]const u8 {
     return "MonoMockDummyMachine";
 }
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+fn @"System.DateTime.get_Now"() void {}
 
 // .{ .name = "Object", .methods = &[_]MockMethod{
 //     .{ .name = ".ctor", .sig = .{
@@ -341,11 +359,14 @@ const assemblies = [_]MockAssembly{
     .{ .name = .{ .cstr = "mscorlib" }, .image = .{
         .namespaces = &[_]Namespace{
             .{ .prefix = "System", .classes = &[_]MockClass{
+                .{ .name = "DateTime", .methods = &[_]MockMethod{
+                    .{ .name = "get_Now", .impl = .{ .return_datetime = &@"System.DateTime.get_Now" } },
+                }, .fields = &[_]MockClassField{} },
                 .{ .name = "Int32", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{
                     .{ .name = "MaxValue", .protection = .public, .kind = .{ .static = .{ .i4 = std.math.maxInt(i32) } } },
                 } },
                 .{ .name = "Decimal", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{
-                    .{ .name = "flags", .protection = .private, .kind = .{ .instance = &MockType.i4 } },
+                    .{ .name = "flags", .protection = .private, .kind = .{ .instance = &types.i4 } },
                 } },
                 .{ .name = "Console", .methods = &[_]MockMethod{
                     .{ .name = "WriteLine", .impl = .{ .return_void = &@"System.Console.WriteLine0" } },
@@ -562,7 +583,7 @@ fn mock_signature_get_params(
 
 fn mock_type_get_type(type_opaque: *const mono.Type) callconv(.c) mono.TypeKind {
     const t: *const MockType = .fromMono(type_opaque);
-    return t.kind;
+    return t.kind();
 }
 
 fn mock_object_new(
@@ -618,6 +639,7 @@ fn mock_runtime_invoke(
         .return_static_string => |f| {
             return domain.new(.{ .static_string = f() }).toMono();
         },
+        .return_datetime => @panic("todo"),
     }
 }
 
