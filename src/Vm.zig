@@ -1590,7 +1590,41 @@ fn evalBuiltin(
         .@"@ScheduleTests" => {
             vm.tests_scheduled = true;
         },
+        .@"@ToString" => {
+            var value = vm.pop(args_addr);
+            defer value.discard(vm.mono_funcs);
+            switch (value) {
+                .integer => |value_i64| {
+                    var buf: [32]u8 = undefined;
+                    try vm.pushNewManagedString(
+                        builtin_extent.start,
+                        std.fmt.bufPrint(&buf, "{d}", .{value_i64}) catch |err| switch (err) {
+                            error.NoSpaceLeft => unreachable,
+                        },
+                    );
+                },
+                inline else => |_, tag| return vm.setError(.{ .not_implemented = "@ToString " ++ @tagName(tag) }),
+            }
+        },
     }
+}
+
+fn pushNewManagedString(vm: *Vm, text_pos: usize, slice: []const u8) error{Vm}!void {
+    const managed_str = vm.mono_funcs.string_new_len(
+        vm.mono_funcs.domain_get().?,
+        slice.ptr,
+        std.math.cast(c_uint, slice.len) orelse return vm.setError(.{ .static_error = .{
+            .pos = text_pos,
+            .string = "string too long",
+        } }),
+    ) orelse return vm.setError(.{ .static_error = .{
+        .pos = text_pos,
+        .string = "mono_string_new_len failed",
+    } });
+    const handle = vm.mono_funcs.gchandle_new(@ptrCast(managed_str), 0);
+    errdefer vm.mono_funcs.gchandle_free(handle);
+    (try vm.push(Type)).* = .managed_string;
+    (try vm.push(mono.GcHandle)).* = handle;
 }
 
 fn log(
@@ -2312,6 +2346,7 @@ const Builtin = enum {
     @"@Discard",
     // @"@ScheduleMs",
     @"@ScheduleTests",
+    @"@ToString",
     pub fn params(builtin: Builtin) ?[]const BuiltinParamType {
         return switch (builtin) {
             .@"@Assert" => &.{.{ .concrete = .integer }},
@@ -2326,6 +2361,7 @@ const Builtin = enum {
             .@"@Discard" => &.{.anything},
             // .@"@ScheduleMs" => null,
             .@"@ScheduleTests" => &.{},
+            .@"@ToString" => &.{.anything},
         };
     }
 };
@@ -2342,6 +2378,7 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Discard", .@"@Discard" },
     // .{ "@ScheduleMs", .@"@ScheduleMs" },
     .{ "@ScheduleTests", .@"@ScheduleTests" },
+    .{ "@ToString", .@"@ToString" },
 });
 
 const BinaryOpPriority = enum {
@@ -3622,6 +3659,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\  if (counter == 7) { break }
         \\continue
     );
+    if (false) try testCode(mono_funcs, "@ToString(1234)");
 }
 
 const monolog = std.log.scoped(.mono);
