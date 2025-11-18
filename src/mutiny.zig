@@ -72,7 +72,26 @@ fn callback(cb: zin.Callback(.{ .static = .main })) void {
         .window_size => {},
         .draw => |d| {
             d.clear();
-            d.text("MutinyFolder: C:\\mutiny", 0, 0, .white);
+
+            const mods_path = "C:\\mutiny\\mods";
+            lineOut(&d, 0, "Mods Folder: " ++ mods_path);
+
+            var dir = std.fs.openDirAbsolute(mods_path, .{ .iterate = true }) catch |e| {
+                lineOutFmt(&d, 1, "open '{s}' failed with {s}", .{ mods_path, @errorName(e) });
+                return;
+            };
+            defer dir.close();
+
+            var it = dir.iterate();
+            var row: i32 = 1;
+            while (it.next() catch |err| {
+                lineOutFmt(&d, row, "dir next failed with {s}", .{@errorName(err)});
+                return;
+            }) |entry| {
+                lineOut(&d, row, entry.name);
+                row += 1;
+            }
+
             // {
             //     const now = std.time.Instant.now() catch @panic("?");
             //     const elapsed_ns = if (global.last_animation) |l| now.since(l) else 0;
@@ -123,6 +142,17 @@ fn callback(cb: zin.Callback(.{ .static = .main })) void {
             zin.staticWindow(.main).invalidate();
         },
     }
+}
+
+const margin = 5;
+const line_height = 24;
+
+fn lineOut(d: *const zin.Draw(.{ .static = .main }), row: i32, str: []const u8) void {
+    d.text(str, margin, margin + row * line_height, .white);
+}
+fn lineOutFmt(d: *const zin.Draw(.{ .static = .main }), row: i32, comptime fmt: []const u8, args: anytype) void {
+    var text_buf: [1000]u8 = undefined;
+    lineOut(d, row, std.fmt.bufPrint(&text_buf, fmt, args) catch @panic("string too long"));
 }
 
 const Icons = struct {
