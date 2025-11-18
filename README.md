@@ -6,6 +6,12 @@ A scriptable dll injector for modding Unity games.
 
 Launch the game like normal. At any point you can inject `Mutiny.dll`. Once injected, Mutiny will continuously monitor the directory `C:\mutiny\mods\InsertGameNameHere` for script files and reload them when they change.
 
+I'm working on a nice GUI app to inject `Mutiny.dll` but for now it's just a CLI, i.e.
+
+```batch
+> zig-out\bin\injector zig-out\bin\Mutiny.dll attach PID
+```
+
 # Example Script
 
 Here's a hacky example script I created on the fly to make myself and a couple friends "GODS" in the game "R.E.P.O".

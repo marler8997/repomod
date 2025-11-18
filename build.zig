@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
     // const win32_dep = b.dependency("win32", .{});
     const win32_mod = win32_dep.module("win32");
 
+    // old code that I'll probably need later in order to inject my own managed dll
     const mutiny_managed_dll = blk: {
         const compile = b.addSystemCommand(&.{
             "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe",
@@ -34,9 +35,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "win32", .module = win32_mod },
-                .{ .name = "managed_dll", .module = b.createModule(.{
-                    .root_source_file = mutiny_managed_dll,
-                }) },
+                // .{ .name = "managed_dll", .module = b.createModule(.{
+                //     .root_source_file = mutiny_managed_dll,
+                // }) },
             },
         }),
     });
@@ -64,10 +65,10 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        const launcher = b.addExecutable(.{
-            .name = "launcher",
+        const injector = b.addExecutable(.{
+            .name = "injector",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/launcher.zig"),
+                .root_source_file = b.path("src/injector.zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
@@ -75,19 +76,16 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
-        // launcher.linkSystemLibrary("kernel32");
-        // launcher.linkLibC();
-        const install = b.addInstallArtifact(launcher, .{});
+        const install = b.addInstallArtifact(injector, .{});
         b.getInstallStep().dependOn(&install.step);
 
-        const run = b.addRunArtifact(launcher);
+        const run = b.addRunArtifact(injector);
         run.step.dependOn(&install.step);
         run.step.dependOn(&install_mutiny_native_dll.step);
-        run.step.dependOn(&install_mutiny_managed_dll.step);
+        // run.step.dependOn(&install_mutiny_managed_dll.step);
         run.step.dependOn(&install_test_game.step);
 
         run.addArtifactArg(mutiny_native_dll);
-        run.addFileArg(mutiny_managed_dll);
         run.addArtifactArg(test_game);
         b.step("testgame", "").dependOn(&run.step);
     }
@@ -127,16 +125,4 @@ pub fn build(b: *std.Build) void {
         const run = b.addRunArtifact(t);
         b.step("test", "").dependOn(&run.step);
     }
-    // b.installArtifact(framework);
-
-    // // Create a run step for the launcher
-    // const run_cmd = b.addRunArtifact(launcher);
-    // run_cmd.step.dependOn(b.getInstallStep());
-
-    // if (b.args) |args| {
-    //     run_cmd.addArgs(args);
-    // }
-
-    // const run_step = b.step("run", "Run the launcher");
-    // run_step.dependOn(&run_cmd.step);
 }

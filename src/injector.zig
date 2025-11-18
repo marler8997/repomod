@@ -7,7 +7,7 @@ pub fn main() !void {
     // no need to free
 
     if (all_args.len <= 1) {
-        try std.fs.File.stderr().writeAll("Usage: launcher.exe MUTINY_DLL [attach PID][start EXE...]\n");
+        try std.fs.File.stderr().writeAll("Usage: injector.exe MUTINY_DLL [attach PID][start EXE...]\n");
         std.process.exit(0xff);
     }
     const args = all_args[1..];
@@ -204,7 +204,7 @@ fn createProcess(name: []const u16, game_exe: [:0]const u16) !ProcessResult {
 
     if (true) {
         var stdout = stdout_file.writer(&.{});
-        stdout.interface.writeAll("launcher has created this log for the child process stdout\n") catch {
+        stdout.interface.writeAll("injector has created this log for the child process stdout\n") catch {
             std.log.err(
                 "write to stdout failed with {t}",
                 .{stdout.err orelse error.Unexpected},
@@ -213,7 +213,7 @@ fn createProcess(name: []const u16, game_exe: [:0]const u16) !ProcessResult {
     }
     if (true) {
         var stderr = stderr_file.writer(&.{});
-        stderr.interface.writeAll("launcher has created this log for the child process stderr\n") catch {
+        stderr.interface.writeAll("injector has created this log for the child process stderr\n") catch {
             std.log.err(
                 "write to stderr failed with {t}",
                 .{stderr.err orelse error.Unexpected},
